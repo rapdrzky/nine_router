@@ -1,1 +1,162 @@
-.github
+.env
+# ---- Session config (Rap) ----
+rap.md
+memory.md
+claude.md
+cheatsheet.md
+skills/
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+service-account*.json
+*credentials*.json
+*secret*.json
+*.secrets
+secrets.yml
+secrets.yaml
+secrets.json
+vault.json
+.token
+*.token
+
+# ---- API Keys & Tokens ----
+*apikey*
+*api_key*
+*access_token*
+*refresh_token*
+*client_secret*
+*private_key*
+
+# ---- SSH & GPG ----
+id_rsa
+id_ed25519
+id_ecdsa
+*.pub
+!README.md
+*.gpg
+*.asc
+
+# ---- Cloud Provider Config ----
+.aws/
+.gcloud/
+.azure/
+/service-account*.json
+/firebase*.json
+/firebase*.cache
+
+# ---- Node.js ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.yarn/
+.pnp.*
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.env.local
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Go ----
+/vendor/
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ---- Rust ----
+/target/
+**/*.rs.bk
+
+# ---- Java/Gradle ----
+*.class
+*.jar
+*.war
+*.ear
+.gradle/
+build/
+out/
+*.log
+
+# ---- .NET/C# ----
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+packages/
+
+# ---- Dart/Flutter ----
+.dart_tool/
+.packages
+build/
+*.iml
+
+# ---- IDE & Editor ----
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ---- OS Files ----
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---- Logs ----
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- Databases ----
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+*.bak
+
+# ---- Build Artifacts ----
+dist/
+build/
+out/
+*.min.js
+*.min.css
+.map
+
+# ---- Misc ----
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
