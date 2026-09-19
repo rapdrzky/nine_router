@@ -10,7 +10,7 @@ Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](h
 ## Features
 
 - Image version is pinned (`v0.5.75` + immutable digest), so builds are reproducible and upstream tag rewrites cannot change production behavior.
-- Startup patch keeps client-requested `stream` behavior; tools are injected without forcing SSE.
+- Startup patch forces `stream: true` on opencode requests; the free tier rejects non-streaming requests (`FreeTierError`), so this is required.
 - Dashboard for provider setup, quota tracking, and API keys.
 - OpenAI-compatible API at `/v1` for any CLI tool or client.
 
