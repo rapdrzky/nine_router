@@ -1,7 +1,6 @@
 #!/bin/sh
 set -e
 
-# Patch fail = log + exit, so failure is visible in Railway logs
 if ! node /app/patch_oc_nine_router.js; then
   echo "ERROR: opencode patch failed or build dir not found" >&2
   exit 1
