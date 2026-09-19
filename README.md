@@ -9,9 +9,8 @@ Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](h
 
 ## Features
 
-- One-click deploy to Railway from this repository.
-- Image version is pinned (`v0.5.75`), so builds are reproducible.
-- Automatic restart on failure (up to 3 retries).
+- Image version is pinned (`v0.5.75` + immutable digest), so builds are reproducible and upstream tag rewrites cannot change production behavior.
+- Startup patch keeps client-requested `stream` behavior; tools are injected without forcing SSE.
 - Dashboard for provider setup, quota tracking, and API keys.
 - OpenAI-compatible API at `/v1` for any CLI tool or client.
 
@@ -63,11 +62,13 @@ The patch anchors on the `0.5.75` build (chunk names and minified markers). If i
 
 ## Upgrading
 
-Change the image tag in the `Dockerfile`, then redeploy:
+Change the image tag and digest in the `Dockerfile`, then redeploy:
 
 ```dockerfile
-FROM decolua/9router:0.5.75
+FROM decolua/9router:<new-tag>@sha256:<new-digest>
 ```
+
+Get the digest from Docker Hub: `docker pull decolua/9router:<new-tag>` then `docker image inspect decolua/9router:<new-tag> --format '{{index .RepoDigests 0}}'`, or the Docker Hub API `https://hub.docker.com/v2/repositories/decolua/9router/tags/<new-tag>`.
 
 Release list: https://github.com/decolua/9router/releases
 
