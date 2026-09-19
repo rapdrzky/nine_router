@@ -94,8 +94,6 @@ function patch() {
   return true;
 }
 
-// Start mode: node patch_oc_nine_router.js --start
-// Patch first, then exec into the 9Router server (signal-transparent, replaces PID semantics).
 function start() {
   if (!patch()) {
     console.error("ERROR: opencode patch failed or build dir not found");
@@ -116,12 +114,9 @@ function start() {
     }
   }
 
-  // Fallback: bare 9router CLI, mirrors the old shell fallback
   runChild(["9router", "-p", process.env.PORT || "20128", "-H", "0.0.0.0", "-n", "-l", "--skip-update"]);
 }
 
-// Spawn child, forward SIGTERM/SIGINT (Railway sends SIGTERM on redeploy/stop),
-// exit with the child's code so Railway sees real server status.
 function runChild(cmd) {
   const child = require("child_process").spawn(cmd[0], cmd.slice(1), {
     stdio: "inherit",
