@@ -72,15 +72,15 @@ const PATCHES = [
   }
 ];
 
-function run() {
-  const roots = [process.argv[2], process.cwd(), "/app", "/root", "/home", "/usr", "/var", "/opt", "/"].filter(Boolean);
+function patch() {
+  const roots = [process.argv[2] === "--start" ? null : process.argv[2], process.cwd(), "/app", "/root", "/home", "/usr", "/var", "/opt", "/"].filter(Boolean);
   let build = null;
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
     build = locate(root, root === "/" ? 5 : 6);
     if (build) break;
   }
-  if (!build) process.exit(1);
+  if (!build) return false;
 
   for (const { files, fn } of PATCHES) {
     for (const rel of files) {
@@ -91,6 +91,51 @@ function run() {
       if (out && out !== src) fs.writeFileSync(file, out);
     }
   }
+  return true;
 }
 
-run();
+// Start mode: node patch_oc_nine_router.js --start
+// Patch first, then exec into the 9Router server (signal-transparent, replaces PID semantics).
+function start() {
+  if (!patch()) {
+    console.error("ERROR: opencode patch failed or build dir not found");
+    process.exit(1);
+  }
+
+  const candidates = [
+    ["/app/app/server.js", ["node", "/app/app/server.js"]],
+    ["/app/server.js", ["node", "/app/server.js"]],
+    ["/root/.npm-global/lib/node_modules/9router/app/server.js", ["node", "/root/.npm-global/lib/node_modules/9router/app/server.js"]],
+    ["/usr/local/lib/node_modules/9router/app/server.js", ["node", "/usr/local/lib/node_modules/9router/app/server.js"]]
+  ];
+
+  for (const [entry, cmd] of candidates) {
+    if (fs.existsSync(entry)) {
+      runChild(cmd);
+      return;
+    }
+  }
+
+  // Fallback: bare 9router CLI, mirrors the old shell fallback
+  runChild(["9router", "-p", process.env.PORT || "20128", "-H", "0.0.0.0", "-n", "-l", "--skip-update"]);
+}
+
+// Spawn child, forward SIGTERM/SIGINT (Railway sends SIGTERM on redeploy/stop),
+// exit with the child's code so Railway sees real server status.
+function runChild(cmd) {
+  const child = require("child_process").spawn(cmd[0], cmd.slice(1), {
+    stdio: "inherit",
+    env: process.env
+  });
+  child.on("error", (err) => {
+    console.error(`ERROR: failed to start ${cmd[0]}: ${err.message}`);
+    process.exit(1);
+  });
+  for (const sig of ["SIGTERM", "SIGINT"]) {
+    process.on(sig, () => child.kill(sig));
+  }
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
+if (process.argv[2] === "--start") start();
+else patch();

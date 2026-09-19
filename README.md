@@ -32,10 +32,9 @@ Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](h
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Base image, pinned to a specific 9Router release; copies patch files and runs the patch script at startup |
+| `Dockerfile` | Base image, pinned to a specific 9Router release; copies the patch script and runs it as the container entrypoint |
 | `railway.json` | Railway build and deploy settings, including healthcheck |
-| `patch_oc_nine_router.js` | Startup patch: adds the opencode provider models (`union-alpha`, `union-alpha-free`) and capabilities |
-| `start_patch_oc_nine_router.sh` | Entry point: applies the patch, then starts 9Router |
+| `patch_oc_nine_router.js` | Startup entrypoint: applies the opencode patch (with `--start`), then starts 9Router |
 | `.env` | Local variables for manual `docker run` only; Railway ignores it |
 
 ### railway.json
