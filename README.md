@@ -33,8 +33,10 @@ Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](h
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Base image, pinned to a specific 9Router release |
-| `railway.json` | Railway build and deploy settings |
+| `Dockerfile` | Base image, pinned to a specific 9Router release; copies patch files and runs the patch script at startup |
+| `railway.json` | Railway build and deploy settings, including healthcheck |
+| `patch_oc_nine_router.js` | Startup patch: adds the opencode provider models (`union-alpha`, `union-alpha-free`) and capabilities |
+| `start_patch_oc_nine_router.sh` | Entry point: applies the patch, then starts 9Router |
 | `.env` | Local variables for manual `docker run` only; Railway ignores it |
 
 ### railway.json
@@ -44,10 +46,20 @@ Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](h
   "build": { "dockerfilePath": "Dockerfile" },
   "deploy": {
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 3
+    "restartPolicyMaxRetries": 3,
+    "healthcheckPath": "/v1/models"
   }
 }
 ```
+
+### Opencode patch
+
+The container patches the 9Router build at startup (`patch_oc_nine_router.js`) before starting the server:
+
+- Replaces the opencode provider module so requests route to `union-alpha` / `union-alpha-free` with proper session headers.
+- Adds both models to the opencode model list and capability map (vision, reasoning, 262k context).
+
+The patch anchors on the `0.5.75` build (chunk names and minified markers). If it cannot apply, the container exits with `ERROR: opencode patch failed or build dir not found` in the Railway logs instead of starting silently unpatched. After a 9Router version bump, verify the patch still applies; if not, update the chunk anchors in `patch_oc_nine_router.js`.
 
 ## Upgrading
 
