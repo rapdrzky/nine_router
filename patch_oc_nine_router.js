@@ -14,7 +14,8 @@ function locate(start, maxDepth) {
     } catch {
       continue;
     }
-    if (fs.existsSync(path.join(dir, "server", "chunks", "318.js"))) return dir;
+    // 0.5.85: module 4493 lives in 5330.js
+    if (fs.existsSync(path.join(dir, "server", "chunks", "5330.js"))) return dir;
     for (const ent of entries) {
       if (ent.isDirectory() && !SKIP.has(ent.name)) {
         stack.push([path.join(dir, ent.name), depth + 1]);
@@ -24,50 +25,91 @@ function locate(start, maxDepth) {
   return null;
 }
 
-const MODULE_4493 = `4493:(a,b,c)=>{c.d(b,{j:()=>p});var d=c(55511),e=c.n(d),f=c(74957),g=c(35024),h=c(72239),i=c(86724),j=c(80662),k=c(59096);let l=new Set(["muse-spark-1.2-contributor-free","muse-spark-1.3-contributor-free"]);let _Q4=[{type:"function",function:{name:"bash",description:"Run shell commands",parameters:{type:"object",properties:{command:{type:"string"}},required:["command"]}}},{type:"function",function:{name:"glob",description:"Find files by pattern",parameters:{type:"object",properties:{pattern:{type:"string"}},required:["pattern"]}}},{type:"function",function:{name:"grep",description:"Search file contents",parameters:{type:"object",properties:{pattern:{type:"string"},path:{type:"string"}},required:["pattern","path"]}}},{type:"function",function:{name:"read",description:"Read file contents",parameters:{type:"object",properties:{path:{type:"string"}},required:["path"]}}}];function _b62(p){let ch="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",hx=Date.now().toString(16).padStart(12,"0").slice(-12),rd="",by=require("crypto").randomBytes(14);for(let i=0;i<14;i++)rd+=ch[by[i]%62];return p+hx+rd}function m(){return _b62("ses_")}function n(a){return String(a||"").replace(/\\([^()]+\\)\\s*$/,"").trim()}function o(a){let b=n(a);return l.has(b)||(0,k.nh)(b)}function _isU(a){let b=n(a).toLowerCase();return b==="union-alpha"||b==="union-alpha-free"||b.includes("union-alpha")}function _injectQ4(b){if(!b||typeof b!=="object")return;b.stream=!0;if(!Array.isArray(b.tools))b.tools=[];let have=new Set(b.tools.map(t=>t?.function?.name||"").filter(Boolean));for(let t of _Q4)if(!have.has(t.function.name))b.tools.push(t)}class p extends f.H{constructor(){super("opencode",g.xq.opencode),this._currentSessionId=null}transformRequest(a,b,c,d){let e;b&&b.model==="union-alpha-free"&&(b.model="union-alpha");_injectQ4(b);return this._currentSessionId=(e=d?.rawHeaders||{},(0,j.oV)({headers:e,body:b,connectionId:d?.connectionId,scope:"opencode",generate:m})),o(a)&&(void 0===b.max_output_tokens&&(void 0!==b.max_completion_tokens?b.max_output_tokens=b.max_completion_tokens:void 0!==b.max_tokens&&(b.max_output_tokens=b.max_tokens)),delete b.max_tokens,delete b.max_completion_tokens,!function(a,b){let c=b.reasoning,d=c&&"object"==typeof c&&!Array.isArray(c)?c:null,e="string"==typeof b.reasoning_effort?b.reasoning_effort:d?.effort;if("string"!=typeof e)return;let f=n(a||b.model),g=(0,h.k)("opencode",f),i=e.toLowerCase().trim();("max"===i||"ultra"===i)&&g?.length&&!g.includes(i)&&("ultra"===i&&g.includes("max")?i="max":g.includes("xhigh")&&(i="xhigh")),b.reasoning={...d,effort:i},b.reasoning.summary||(b.reasoning.summary="auto"),delete b.reasoning_effort}(a,b)),(0,i.Z)({provider:this.provider,model:a,body:b})}buildUrl(a){let b=this.config.baseUrl;return _isU(a)?\`\${b}/zen/v1/messages\`:o(a)?\`\${b}/zen/v1/responses\`:\`\${b}/zen/v1/chat/completions\`}buildHeaders(a,b=!0,u_url,u_model){let c=a?.rawHeaders||{},d={};for(let[a,b]of Object.entries(c))d[a.toLowerCase()]=b;let f=d["user-agent"]||"",ua=/opencode\\/\\d+/i.test(f)?f:"opencode/1.18.31",isC=_isU(u_model)||(u_url&&u_url.includes("/messages")),ses=d["x-opencode-session"]||this._currentSessionId||m(),req=d["x-opencode-request"]||_b62("msg_");ses.startsWith("ses_")&&ses.length===30||(ses=m());req.startsWith("msg_")&&req.length===30||(req=_b62("msg_"));let hdrs={"Content-Type":"application/json",Authorization:"Bearer public","User-Agent":ua,"x-opencode-client":"desktop","x-opencode-session":ses,"x-opencode-request":req,"x-opencode-project":d["x-opencode-project"]||"global",Accept:b?"text/event-stream":"*/*"};if(isC){hdrs["anthropic-version"]="2023-06-01";}return hdrs;}}}`
-
 const CLAUDE_MODELS = [
   { id: "union-alpha", name: "Union Alpha Free", targetFormat: "claude" },
   { id: "union-alpha-free", name: "Union Alpha Free", targetFormat: "claude" }
 ];
 
 const CAP_ANCHOR = `"muse-spark-1.2-contributor-free":{vision:!0,reasoning:!0,thinkingFormat:"openai",contextWindow:1048576,maxOutput:131072}`;
-const CAP_EXTRA = `"union-alpha":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072},"union-alpha-free":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072},`;
+// 0.5.85: union-alpha already exists in capability map but missing reasoning+thinkingFormat
+const CAP_EXTRA = `,"union-alpha-free":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072}`;
 
 const PATCHES = [
+  // PATCH 1: Inject union-alpha-free into the free-tier Set and add _Q4 tool definitions
+  // in module 4493 (5330.js). Also add union-alpha-free to the routing Set.
   {
-    files: [["server", "chunks", "318.js"]],
+    files: [["server", "chunks", "5330.js"]],
     fn(c) {
-      const start = c.indexOf("4493:(a,b,c)=>");
-      if (start === -1) return null;
-      const m = /\d+:\(a,b,c\)=>/.exec(c.slice(start + 10));
-      const boundary = m ? /,\d+:\(a,b,c\)=>/.exec(c.slice(start + 10)) : null;
-      if (!boundary) return null;
-      const cut = start + 10 + boundary.index;
-      return c.slice(0, start) + MODULE_4493 + c.slice(cut);
-    }
-  },
-  {
-    files: [
-      ["server", "chunks", "3753.js"],
-      ["server", "chunks", "7011.js"],
-      ["server", "chunks", "8236.js"],
-      ["static", "chunks", "1321-b7836dc184959aa5.js"]
-    ],
-    fn(c) {
-      const out = c.replace(/(\{id:"opencode"[^}]*?)models:\[[^\]]*\]/, `$1models:${JSON.stringify(CLAUDE_MODELS)}`);
+      // Add "union-alpha-free" to the muse-spark free-tier Set
+      const setAnchor = 'new Set(["muse-spark-1.2-contributor-free","muse-spark-1.3-contributor-free"])';
+      const setReplacement = 'new Set(["muse-spark-1.2-contributor-free","muse-spark-1.3-contributor-free","union-alpha-free"])';
+      let out = c.replace(setAnchor, setReplacement);
+
+      // Add "union-alpha-free" to the union-alpha routing Set (w)
+      const routingAnchor = 'w=new Set(["union-alpha"])';
+      const routingReplacement = 'w=new Set(["union-alpha","union-alpha-free"])';
+      out = out.replace(routingAnchor, routingReplacement);
+
+      // Inject _Q4 tool definitions and _injectQ4 helper after the Set declarations
+      // Find the insertion point: after "x=0,y=0;"
+      const toolsDecl = `x=0,y=0;`;
+      const toolsInsert = `x=0,y=0;let _Q4=[{type:"function",function:{name:"bash",description:"Run shell commands",parameters:{type:"object",properties:{command:{type:"string"}},required:["command"]}}},{type:"function",function:{name:"glob",description:"Find files by pattern",parameters:{type:"object",properties:{pattern:{type:"string"}},required:["pattern"]}}},{type:"function",function:{name:"grep",description:"Search file contents",parameters:{type:"object",properties:{pattern:{type:"string"},path:{type:"string"}},required:["pattern","path"]}}},{type:"function",function:{name:"read",description:"Read file contents",parameters:{type:"object",properties:{path:{type:"string"}},required:["path"]}}}];function _injectQ4(b){if(!b||typeof b!=="object")return;b.stream=!0;if(!Array.isArray(b.tools))b.tools=[];let have=new Set(b.tools.map(t=>t?.function?.name||"").filter(Boolean));for(let t of _Q4)if(!have.has(t.function.name))b.tools.push(t)}`;
+      out = out.replace(toolsDecl, toolsInsert);
+
+      // Inject model mapping and tool injection at start of transformRequest
+      // Original starts with: transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)
+      const trAnchor = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)';
+      const trReplacement = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&(b.model==="union-alpha-free"&&(b.model="union-alpha"),!b.model&&(b.model=a)),b&&"object"==typeof b&&(b.stream=!0),_injectQ4(b)';
+      out = out.replace(trAnchor, trReplacement);
+
       return out === c ? null : out;
     }
   },
+  // PATCH 2: Add union-alpha-free to opencode provider model list
+  // union-alpha already exists in 0.5.85; just inject union-alpha-free after it
+  {
+    files: [
+      ["server", "chunks", "235.js"],
+      ["server", "chunks", "4895.js"],
+      ["server", "chunks", "8325.js"]
+    ],
+    fn(c) {
+      // Add union-alpha-free after union-alpha in supportedFormats arrays
+      const uaEntry = '{id:"union-alpha",name:"Union Alpha",supportedFormats:["claude"]}';
+      const uaFreeEntry = '{id:"union-alpha-free",name:"Union Alpha Free",supportedFormats:["claude"]}';
+      let out = c;
+      if (out.includes(uaEntry) && !out.includes('union-alpha-free')) {
+        out = out.replace(uaEntry, uaEntry + ',' + uaFreeEntry);
+      }
+      // Also handle models:[...] format with targetFormat
+      const uaModel = '{"id":"union-alpha","name":"Union Alpha Free","targetFormat":"claude"}';
+      const uaFreeModel = '{"id":"union-alpha-free","name":"Union Alpha Free","targetFormat":"claude"}';
+      if (out.includes(uaModel) && !out.includes('union-alpha-free')) {
+        out = out.replace(uaModel, uaModel + ',' + uaFreeModel);
+      }
+      return out === c ? null : out;
+    }
+  },
+  // PATCH 3: Add union-alpha-free to capability map
+  // union-alpha already exists but missing reasoning+thinkingFormat; union-alpha-free is new
   {
     files: [
       ["server", "chunks", "24.js"],
       ["server", "chunks", "412.js"],
-      ["server", "chunks", "8402.js"],
-      ["static", "chunks", "5497-a3aa1159d255e86a.js"]
+      ["server", "chunks", "8402.js"]
     ],
     fn(c) {
-      return c.includes(CAP_ANCHOR) ? c.replace(CAP_ANCHOR, CAP_EXTRA + CAP_ANCHOR) : null;
+      // First: update existing union-alpha entry to include reasoning+thinkingFormat
+      const uaOld = '"union-alpha":{vision:!0,contextWindow:262144,maxOutput:131072}';
+      const uaNew = '"union-alpha":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072}';
+      let out = c.replace(uaOld, uaNew);
+
+      // Then: add union-alpha-free after the muse-spark-1.2 anchor
+      if (out.includes(CAP_ANCHOR) && !out.includes('"union-alpha-free"')) {
+        out = out.replace(CAP_ANCHOR, CAP_ANCHOR + CAP_EXTRA);
+      }
+
+      return out === c ? null : out;
     }
   }
 ];
