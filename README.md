@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Railway](https://img.shields.io/badge/deploy-Railway-purple)
 ![Docker](https://img.shields.io/badge/runtime-Docker-blue)
-![Version](https://img.shields.io/badge/9router-v0.5.75-green)
+![Version](https://img.shields.io/badge/9router-v0.5.85-green)
 
 Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](https://railway.app) with Docker. 9Router is a free AI router and token saver — it connects Claude Code, Codex, Cursor, Cline, Copilot, and other CLI tools to 40+ AI providers with automatic fallback and 20-40% token savings via RTK.
 
