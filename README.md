@@ -3,13 +3,13 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Railway](https://img.shields.io/badge/deploy-Railway-purple)
 ![Docker](https://img.shields.io/badge/runtime-Docker-blue)
-![Version](https://img.shields.io/badge/9router-v0.5.85-green)
+![Version](https://img.shields.io/badge/9router-v0.5.86-green)
 
 Nine Router deploys [9Router](https://github.com/decolua/9router) to [Railway](https://railway.app) with Docker. 9Router is a free AI router and token saver — it connects Claude Code, Codex, Cursor, Cline, Copilot, and other CLI tools to 40+ AI providers with automatic fallback and 20-40% token savings via RTK.
 
 ## Features
 
-- Image version is pinned (`v0.5.75` + immutable digest), so builds are reproducible and upstream tag rewrites cannot change production behavior.
+- Image version is pinned (`v0.5.86` + immutable digest), so builds are reproducible and upstream tag rewrites cannot change production behavior.
 - Startup patch forces `stream: true` on opencode requests; the free tier rejects non-streaming requests (`FreeTierError`), so this is required.
 - Dashboard for provider setup, quota tracking, and API keys.
 - OpenAI-compatible API at `/v1` for any CLI tool or client.
@@ -57,7 +57,7 @@ The container patches the 9Router build at startup (`patch_oc_nine_router.js`) b
 - Replaces the opencode provider module so requests route to `union-alpha` / `union-alpha-free` with proper session headers.
 - Adds both models to the opencode model list and capability map (vision, reasoning, 262k context).
 
-The patch anchors on the `0.5.75` build (chunk names and minified markers). If it cannot apply, the container exits with `ERROR: opencode patch failed or build dir not found` in the Railway logs instead of starting silently unpatched. After a 9Router version bump, verify the patch still applies; if not, update the chunk anchors in `patch_oc_nine_router.js`.
+The patch anchors on the `0.5.86` build (chunk names and minified markers). If it cannot apply, the container exits with `ERROR: opencode patch failed or build dir not found` in the Railway logs instead of starting silently unpatched. After a 9Router version bump, verify the patch still applies; if not, update the chunk anchors in `patch_oc_nine_router.js`.
 
 ## Upgrading
 

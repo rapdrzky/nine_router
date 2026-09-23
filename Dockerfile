@@ -1,4 +1,4 @@
-FROM decolua/9router:0.5.85@sha256:7a0d0c4b2fe71c27621b82751c102136ed5c90d6d53c42fedb69f5310e6d9b5e
+FROM decolua/9router:0.5.86@sha256:c6ee24aba24db5e2c70675c6d8ee5846392793b032a4554943b6a8c47a0bedb8
 
 COPY patch_oc_nine_router.js /app/patch_oc_nine_router.js
 
