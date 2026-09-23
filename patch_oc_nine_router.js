@@ -14,7 +14,7 @@ function locate(start, maxDepth) {
     } catch {
       continue;
     }
-    // 0.5.85: module 4493 lives in 5330.js
+    // 0.5.86: module 4493 lives in 5330.js
     if (fs.existsSync(path.join(dir, "server", "chunks", "5330.js"))) return dir;
     for (const ent of entries) {
       if (ent.isDirectory() && !SKIP.has(ent.name)) {
@@ -31,7 +31,7 @@ const CLAUDE_MODELS = [
 ];
 
 const CAP_ANCHOR = `"muse-spark-1.2-contributor-free":{vision:!0,reasoning:!0,thinkingFormat:"openai",contextWindow:1048576,maxOutput:131072}`;
-// 0.5.85: union-alpha already exists in capability map but missing reasoning+thinkingFormat
+// 0.5.86: union-alpha already exists in capability map but missing reasoning+thinkingFormat
 const CAP_EXTRA = `,"union-alpha-free":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072}`;
 
 const PATCHES = [
@@ -54,7 +54,9 @@ const PATCHES = [
       // Find the insertion point: after "x=0,y=0;"
       const toolsDecl = `x=0,y=0;`;
       const toolsInsert = `x=0,y=0;let _Q4=[{type:"function",function:{name:"bash",description:"Run shell commands",parameters:{type:"object",properties:{command:{type:"string"}},required:["command"]}}},{type:"function",function:{name:"glob",description:"Find files by pattern",parameters:{type:"object",properties:{pattern:{type:"string"}},required:["pattern"]}}},{type:"function",function:{name:"grep",description:"Search file contents",parameters:{type:"object",properties:{pattern:{type:"string"},path:{type:"string"}},required:["pattern","path"]}}},{type:"function",function:{name:"read",description:"Read file contents",parameters:{type:"object",properties:{path:{type:"string"}},required:["path"]}}}];function _injectQ4(b){if(!b||typeof b!=="object")return;b.stream=!0;if(!Array.isArray(b.tools))b.tools=[];let have=new Set(b.tools.map(t=>t?.function?.name||"").filter(Boolean));for(let t of _Q4)if(!have.has(t.function.name))b.tools.push(t)}`;
-      out = out.replace(toolsDecl, toolsInsert);
+      // Guard: toolsInsert starts with toolsDecl, so without this check a second
+      // container start would re-declare _Q4 (SyntaxError) on the persisted fs.
+      if (!out.includes("let _Q4=[")) out = out.replace(toolsDecl, toolsInsert);
 
       // Inject model mapping and tool injection at start of transformRequest
       // Original starts with: transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)
@@ -66,7 +68,7 @@ const PATCHES = [
     }
   },
   // PATCH 2: Add union-alpha-free to opencode provider model list
-  // union-alpha already exists in 0.5.85; just inject union-alpha-free after it
+  // union-alpha already exists in 0.5.86; just inject union-alpha-free after it
   {
     files: [
       ["server", "chunks", "235.js"],
