@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Railway](https://img.shields.io/badge/deploy-Railway-purple)
 ![Docker](https://img.shields.io/badge/runtime-Docker-blue)
-![Version](https://img.shields.io/badge/9router-v0.5.91-green)
+![Version](https://img.shields.io/badge/9router-v0.5.95-green)
 
 Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Railway](https://railway.app) on top of its own Docker image. There is no source build here — the image is pinned by tag and digest, and one Node script patches the installed build at container startup before the server boots.
 
@@ -86,7 +86,7 @@ node -e "console.log(require('./patch_opencode_nine_router.js').selfTest() || 'o
 Change the image tag and digest in the `Dockerfile`, redeploy, and update the version badge in this README. Currently pinned:
 
 ```dockerfile
-FROM decolua/9router:0.5.91@sha256:efc6e88c963ddb035f8da26a74e156b927863cd05625b47f3587972bc865bd25
+FROM decolua/9router:0.5.95@sha256:4316fefb95ea642d57db885d906b1227b1768b15ac5def314621fd781da7b3f1
 ```
 
 Upgrade to:
@@ -102,7 +102,7 @@ docker pull decolua/9router:<new-tag>
 docker image inspect decolua/9router:<new-tag> --format '{{index .RepoDigests 0}}'
 ```
 
-Or from the Docker Hub API at `https://hub.docker.com/v2/repositories/decolua/9router/tags/<new-tag>`. Pin the manifest **index** digest (the tag's `docker-content-digest`, e.g. `sha256:efc6e88c…` for `0.5.91`), not a per-platform manifest digest, so the image stays multi-arch.
+Or from the Docker Hub API at `https://hub.docker.com/v2/repositories/decolua/9router/tags/<new-tag>`. Pin the manifest **index** digest (the tag's `docker-content-digest`, e.g. `sha256:4316fefb…` for `0.5.95`), not a per-platform manifest digest, so the image stays multi-arch.
 
 Release list: https://hub.docker.com/r/decolua/9router/tags — the GitHub releases page lags behind the published images.
 
