@@ -33,6 +33,10 @@ const CAP_NEW = '"union-alpha":{vision:!0,reasoning:!0,thinkingFormat:"anthropic
 const CAP_MUSE = '"muse-spark-1.2-contributor-free":{vision:!0,reasoning:!0,thinkingFormat:"openai",contextWindow:1048576,maxOutput:131072}';
 const CAP_FREE = '"union-alpha-free":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072}';
 
+const VERSION_OLD = `async function i(){let a=await h(),b=f.rE,c=!!a&&function(a,b){let c=a.split(".").map(Number),d=b.split(".").map(Number);for(let a=0;a<3;a++){if(c[a]>d[a])return 1;if(c[a]<d[a])return -1}return 0}(a,b)>0;return Response.json({currentVersion:b,latestVersion:a,hasUpdate:c})}`;
+const VERSION_NEW = `async function i(){let a=f.rE;return Response.json({currentVersion:a,latestVersion:a,hasUpdate:!1})}`;
+const VERSION_DONE = "hasUpdate:!1";
+
 function isChunkName(name) {
   return name.endsWith(".js");
 }
@@ -149,9 +153,15 @@ function patchCapabilities(src) {
   return out === src ? null : out;
 }
 
+function patchVersion(src) {
+  if (src.includes(VERSION_DONE)) return null;
+  if (!src.includes(VERSION_OLD)) return null;
+  return src.replace(VERSION_OLD, VERSION_NEW);
+}
+
 function run(options = {}) {
-  const applied = { provider: 0, catalog: 0, capabilities: 0, changed: 0 };
-  const state = { provider: false, catalog: false, capabilities: false };
+  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, changed: 0 };
+  const state = { provider: false, catalog: false, capabilities: false, version: false };
   const files = [];
   const pending = [];
 
@@ -168,18 +178,22 @@ function run(options = {}) {
     if (catalog) { out = catalog; applied.catalog++; }
     const capabilities = patchCapabilities(out);
     if (capabilities) { out = capabilities; applied.capabilities++; }
+    const version = patchVersion(out);
+    if (version) { out = version; applied.version++; }
 
     if (out !== src) pending.push([file, out]);
 
     if (out.includes(ROUTING_NEW) && out.includes("_injectQ4(b)")) state.provider = true;
     if (out.includes(CATALOG_ANCHORS[0][1]) || out.includes(CATALOG_ANCHORS[1][1])) state.catalog = true;
     if (out.includes(CAP_FREE)) state.capabilities = true;
+    if (out.includes(VERSION_DONE)) state.version = true;
   }
 
   const missing = [];
   if (!state.provider) missing.push("opencode provider module (routing Set / transformRequest anchors)");
   if (!state.catalog) missing.push("opencode provider model list (union-alpha entry)");
   if (!state.capabilities) missing.push("model capability map (union-alpha entry)");
+  if (!state.version) missing.push("version route (npm update-check response)");
   if (missing.length) return { ok: false, reason: "anchors not found: " + missing.join("; "), applied, files };
 
   for (const [file, out] of pending) {
@@ -252,8 +266,27 @@ function testInjector() {
   return null;
 }
 
+function testVersionPatch() {
+  const src = `(function(){${VERSION_OLD}})`;
+  const out = patchVersion(src);
+  if (out === null) return "version route anchor did not match";
+  if (!out.includes(VERSION_DONE)) return "version route patch did not disable the update flag";
+  if (out.includes("await h()")) return "version route patch still calls the npm lookup";
+  if (!out.includes("latestVersion:a")) return "version route patch dropped latestVersion from the response";
+  if (patchVersion(out) !== null) return "version route patch is not idempotent";
+  const untouched = "const unrelated = 1;";
+  if (patchVersion(untouched) !== null) return "version route patch modified a file without the anchor";
+  try {
+    const body = new Function(`${VERSION_NEW};return i`)();
+    void body;
+  } catch (err) {
+    return "patched version handler does not parse: " + err.message;
+  }
+  return null;
+}
+
 function selfTest() {
-  return testInjector();
+  return testInjector() || testVersionPatch();
 }
 
 function start() {
@@ -273,7 +306,7 @@ function start() {
   const ver = result.version ? ` 9router=${result.version}` : "";
   const written = result.files.length ? " files=" + result.files.join(",") : "";
   console.log(
-    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} (${result.applied.changed} chunk(s) written)${ver}${written}`
+    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} (${result.applied.changed} chunk(s) written)${ver}${written}`
   );
 
   spawnServer();
@@ -312,7 +345,7 @@ function runChild(cmd) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-module.exports = { run, selfTest, findBuild, collectFiles, testInjector };
+module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testVersionPatch, patchVersion };
 
 if (require.main === module) {
   if (process.argv[2] === "--start") start();

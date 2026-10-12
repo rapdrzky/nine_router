@@ -15,6 +15,7 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 - Startup patch forces `stream: true` on opencode requests. The free tier rejects non-streaming requests (`FreeTierError`), so this is required.
 - Startup patch registers `union-alpha-free` as an alias of `union-alpha`: added to the messages-format routing set, the provider catalog, and the capability map (vision, reasoning, 262k context, 131k output). The alias is translated back to `union-alpha` inside `transformRequest`.
 - Startup patch injects the `bash`, `glob`, `grep` and `read` tool definitions into every opencode request.
+- Startup patch neutralizes the `/api/version` update check, so the dashboard never shows an `↑ New version available` banner. The image is pinned here, not by the 9Router CLI updater, so an upstream npm release cannot be installed in place.
 - Dashboard for provider setup, quota tracking and API keys.
 - OpenAI-compatible API at `/v1` for any CLI tool or client.
 - Healthcheck on `/api/health`, the only unauthenticated route. `/v1/models` needs an API key, so a probe there returns `401` and Railway restarts the service in a loop.
@@ -56,10 +57,11 @@ CMD ["node", "/app/patch_opencode_nine_router.js", "--start"]
 
 `patch_opencode_nine_router.js` runs before the server starts and rewrites the installed 9Router build in place:
 
-- Scans `server/**/*.js` for the provider, catalog and capability anchors instead of hard-coding chunk file names, so an upstream chunk renumbering does not silently skip a copy of the module.
+- Scans `server/**/*.js` for the provider, catalog, capability and version-route anchors instead of hard-coding chunk file names, so an upstream chunk renumbering does not silently skip a copy of the module.
 - Adds `union-alpha-free` to the routing set, the provider model list and the capability map. It deliberately stays out of the responses-format set: `OpenCodeExecutor.buildUrl()` tests `isResponsesModel()` before `isMessagesModel()`, so a responses classification would send this claude-format model to `/zen/v1/responses`.
 - Rewrites the `opencode` `transformRequest` body so `union-alpha-free` maps to `union-alpha`, forces `stream: true`, and calls `_injectQ4(b)`.
 - Installs the `_injectQ4` helper, which fills `body.tools` with the `bash`, `glob`, `grep` and `read` definitions when absent and never overwrites a tool the client already sent.
+- Rewrites the `/api/version` route handler so it reports `currentVersion === latestVersion` and `hasUpdate: false` without contacting the npm registry. Upstream fetches `registry.npmjs.org/9router/latest` and compares it to the version baked into the build, so a pinned image would otherwise advertise an update it can never install.
 - Writes are two-phase: every file is patched and validated in memory first, and only written (temp file plus rename, so a crash cannot leave a half-written chunk) once all anchors are confirmed present.
 - Re-running is safe. Writes converge: a stale injected block is rewritten in place rather than duplicated.
 
@@ -68,10 +70,10 @@ The patch fails fast. If an anchor is missing, or the self-test throws, the cont
 A healthy start logs:
 
 ```
-opencode patch: provider=… catalog=… capabilities=… (N chunk(s) written) 9router=<version> files=<paths>
+opencode patch: provider=… catalog=… capabilities=… version=… (N chunk(s) written) 9router=<version> files=<paths>
 ```
 
-The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries.
+The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, plus the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses).
 
 Standalone usage:
 
@@ -165,6 +167,7 @@ The dashboard is protected by a single password. Anyone who knows the Railway do
 | Dashboard opens on the wrong port | Let Railway set `PORT`; do not define it manually. |
 | First login not working | Check `INITIAL_PASSWORD`. When unset, the fallback password is `123456`. |
 | Container exits with `ERROR: opencode patch failed` | An upstream release moved or renamed a patch anchor. Check the log line for which anchor is missing, then update the constants at the top of `patch_opencode_nine_router.js`. |
+| `↑ New version available` banner in the dashboard | The version-route patch did not apply. Check the `version=` count in the startup log and the "version route (npm update-check response)" entry in the failure reason. |
 | Provider quota exhausted | Add a combo fallback in the dashboard (Subscription → Cheap → Free). |
 
 More help: https://github.com/decolua/9router#troubleshooting
@@ -174,6 +177,7 @@ More help: https://github.com/decolua/9router#troubleshooting
 - **Thin wrapper repo.** 9Router ships its own Docker image, so there is nothing to compile here — only configuration and the startup patch.
 - **Pinned tag and digest.** Upstream releases never change production behavior without an explicit commit.
 - **Startup patch instead of a fork.** The patch is small, idempotent and self-testing, so tracking upstream releases stays cheap while the routing fix survives.
+- **Update banner disabled, not downgraded.** Upstream decides the banner from the npm registry, which publishes before the Docker image. Pinning the image and silencing the banner keeps the notice honest: this deployment has no in-place updater.
 - **Railway.** It builds from a one-line Dockerfile and handles TLS, domains, restarts and the injected `PORT`.
 
 ## Contributing
