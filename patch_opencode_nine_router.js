@@ -13,13 +13,11 @@ const Q4_TOOLS = [
 
 const HELPER_SRC = `function _injectQ4(b){if(!b||typeof b!=="object")return;b.stream=!0;if(!Array.isArray(b.tools))b.tools=[];let have=new Set;for(let t of b.tools){if(!t||typeof t!=="object")continue;let f=t.function&&typeof t.function==="object"?t.function:t;if(typeof f.name==="string"&&f.name)have.add(f.name)}for(let d of _Q4){if(have.has(d.name))continue;b.tools.push({type:"function",function:{name:d.name,description:d.description,parameters:JSON.parse(JSON.stringify(d.parameters||{type:"object",properties:{}}))}})}}`;
 
-const TOOLS_DECL = `x=0,y=0;`;
-const TOOLS_INSERT = TOOLS_DECL + `let _Q4=${JSON.stringify(Q4_TOOLS)};` + HELPER_SRC;
 const TOOLS_MARK = "let _Q4=[";
-const TOOLS_END = "b.tools.push(t)}";
+const TOOLS_INSERT = `let _Q4=${JSON.stringify(Q4_TOOLS)};` + HELPER_SRC;
 
-const ROUTING_OLD = 'w=new Set(["union-alpha"])';
-const ROUTING_NEW = 'w=new Set(["union-alpha","union-alpha-free"])';
+const ROUTING_OLD = 'u=new Set(["union-alpha"])';
+const ROUTING_NEW = 'u=new Set(["union-alpha","union-alpha-free"])';
 const TR_OLD = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)';
 const TR_NEW = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&(b.model==="union-alpha-free"&&(b.model="union-alpha"),!b.model&&(b.model=a)),b&&"object"==typeof b&&(b.stream=!0),_injectQ4(b)';
 
@@ -113,17 +111,8 @@ function appendEntry(src, anchor, extra) {
 }
 
 function patchTools(src) {
-  const mark = src.indexOf(TOOLS_MARK);
-  if (mark !== -1) {
-    const decl = src.lastIndexOf(TOOLS_DECL, mark);
-    const end = src.indexOf(TOOLS_END, mark);
-    if (decl === -1 || end === -1) return src;
-    const existing = src.slice(decl, end + TOOLS_END.length);
-    if (existing === TOOLS_INSERT) return src;
-    return src.slice(0, decl) + TOOLS_INSERT + src.slice(end + TOOLS_END.length);
-  }
-  if (!src.includes(TOOLS_DECL)) return null;
-  return src.replace(TOOLS_DECL, TOOLS_INSERT);
+  if (src.includes(TOOLS_MARK)) return src;
+  return TOOLS_INSERT + src;
 }
 
 function patchProvider(src) {
