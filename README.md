@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Railway](https://img.shields.io/badge/deploy-Railway-purple)
 ![Docker](https://img.shields.io/badge/runtime-Docker-blue)
-![Version](https://img.shields.io/badge/9router-v0.5.95-green)
+![Version](https://img.shields.io/badge/9router-v0.5.109-green)
 
 Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Railway](https://railway.app) on top of its own Docker image. There is no source build here — the image is pinned by tag and digest, and one Node script patches the installed build at container startup before the server boots.
 
@@ -88,7 +88,7 @@ node -e "console.log(require('./patch_opencode_nine_router.js').selfTest() || 'o
 Change the image tag and digest in the `Dockerfile`, redeploy, and update the version badge in this README. Currently pinned:
 
 ```dockerfile
-FROM decolua/9router:0.5.95@sha256:4316fefb95ea642d57db885d906b1227b1768b15ac5def314621fd781da7b3f1
+FROM decolua/9router:0.5.109@sha256:28474ba417ac76198abce43b6758b187201e0acac364f72ff3918b0f7e11b040
 ```
 
 Upgrade to:
