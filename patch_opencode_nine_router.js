@@ -40,6 +40,24 @@ const SESSION_EXEC_RE = /async execute\((\w+)\)\{let (\w+)=this\.prepareRequestC
 
 const SESSION_CLASS_RE = /class (\w+) extends [\w.$]+\.H\{constructor\(\)\{super\("opencode"/;
 
+const PROXY_TEST_MARK = "function _proxyProbe9r(";
+
+const PROXY_TEST_FN_RE = /async function ([$\w]+)\(\{proxyUrl:/;
+
+const PROXY_AGENT_RE = /new ([$\w]+)\.ProxyAgent\(\{uri:([$\w]+)\}\)/;
+
+const PROXY_HEAD_RE = /await \(0,([$\w]+)\.fetch\)\(([$\w]+),\{method:"HEAD",dispatcher:([$\w]+),signal:([$\w]+)\.signal,headers:\{"User-Agent":"9Router"\}\}\)/;
+
+const PROXY_TEST_HELPER =
+  'async function _proxyProbe9r(a,b,c,d,e){' +
+  'let f=async(g,h)=>{let i=await a.fetch(b,{method:g,dispatcher:h,signal:e,headers:{"User-Agent":"9Router"}});' +
+  'if("HEAD"!==g)try{await i.body?.cancel?.()}catch{}return i};' +
+  'try{let g=await f("HEAD",c);if(!g.ok)g=await f("GET",c);return g}' +
+  'catch(g){let h=g&&g.cause||g||{},i=String(h.code||h.name||"")+" "+String(h.message||"");' +
+  'if(!/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS|ALTNAME/i.test(i))throw g;' +
+  'let j=new a.ProxyAgent({uri:d,connect:{rejectUnauthorized:!1},requestTls:{rejectUnauthorized:!1}});' +
+  'try{let k=await f("HEAD",j);if(!k.ok)k=await f("GET",j);return k}finally{try{await j.close()}catch{}}}}';
+
 const RELAY_RULES = [
   {
     anchor: 'newRequestInit.headers.delete("host");',
@@ -276,6 +294,49 @@ function patchSession(src) {
   return out === src ? null : out;
 }
 
+function patchProxyTest(src) {
+  if (src.includes(PROXY_TEST_MARK)) return null;
+
+  const required = src.indexOf('"proxyUrl is required"');
+  if (required < 0) return null;
+
+  const window = src.slice(required, required + 4000);
+
+  const agent = PROXY_AGENT_RE.exec(window);
+  if (!agent) return null;
+  const agentIndex = required + agent.index;
+  const uriVar = agent[2];
+
+  const guard = src.lastIndexOf("try{", agentIndex);
+  if (guard < 0 || agentIndex - guard > 200) return null;
+
+  const fnIndex = src.lastIndexOf("async function ", required);
+  if (fnIndex < 0) return null;
+  const fn = PROXY_TEST_FN_RE.exec(src.slice(fnIndex, required));
+  if (!fn) return null;
+
+  const head = PROXY_HEAD_RE.exec(window);
+  if (!head) return null;
+  const fetchIndex = required + head.index;
+  if (fetchIndex < agentIndex) return null;
+
+  const normalize = `if(${uriVar}.indexOf("://")<0)${uriVar}="http://"+${uriVar};`;
+  const probe = `await _proxyProbe9r(${head[1]},${head[2]},${head[3]},${uriVar},${head[4]}.signal)`;
+
+  let out =
+    src.slice(0, fnIndex) +
+    PROXY_TEST_HELPER +
+    src.slice(fnIndex, guard + 4) +
+    normalize +
+    src.slice(guard + 4, fetchIndex) +
+    probe +
+    src.slice(fetchIndex + head[0].length);
+
+  out = out.replace(/Math\.min\(([$\w]+),3e4\):8e3/, "Math.min($1,3e4):2e4");
+
+  return out === src ? null : out;
+}
+
 function scanCallEnd(src, from) {
   let depth = 0;
   let quote = "";
@@ -301,8 +362,8 @@ function uniqueName(src, base) {
 }
 
 function run(options = {}) {
-  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, session: 0, changed: 0 };
-  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false, session: false };
+  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, session: 0, proxyTest: 0, changed: 0 };
+  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false, session: false, proxyTest: false, proxyTestTarget: false };
   const files = [];
   const pending = [];
 
@@ -325,6 +386,8 @@ function run(options = {}) {
     if (relay) { out = relay; applied.relay++; }
     const session = patchSession(out);
     if (session) { out = session; applied.session++; }
+    const proxyTest = patchProxyTest(out);
+    if (proxyTest) { out = proxyTest; applied.proxyTest++; }
 
     if (out !== src) pending.push([file, out]);
 
@@ -335,6 +398,8 @@ function run(options = {}) {
     if (out.includes(RELAY_MARK)) state.relay = true;
     if (src.includes('"x-relay-target"')) state.relayTemplates = true;
     if (out.includes(SESSION_MARK)) state.session = true;
+    if (out.includes(PROXY_TEST_MARK)) state.proxyTest = true;
+    if (src.includes('"proxyUrl is required"')) state.proxyTestTarget = true;
   }
 
   const missing = [];
@@ -603,11 +668,89 @@ function testSessionPatch() {
   return null;
 }
 
-function selfTest() {
-  return testInjector() || testProviderPatch() || testVersionPatch() || testRelayPatch() || testSessionPatch();
+async function testProxyTest() {
+  const sample =
+    'var d=c(9956);function e(a){return null==a?"":String(a).trim()}async function f({proxyUrl:a,testUrl:b,timeoutMs:c}={}){let g,h=e(a);if(!h)return{ok:!1,status:400,error:"proxyUrl is required"};let i=e(b)||"https://google.com/",j=Number(c),k=Number.isFinite(j)&&j>0?Math.min(j,3e4):8e3;try{try{g=new d.ProxyAgent({uri:h})}catch(a){return{ok:!1,status:400,error:`Invalid proxy URL: ${a?.message||String(a)}`}}let a=new AbortController,b=Date.now(),c=setTimeout(()=>a.abort(),k);try{let c=await (0,d.fetch)(i,{method:"HEAD",dispatcher:g,signal:a.signal,headers:{"User-Agent":"9Router"}});return{ok:c.ok,status:c.status,statusText:c.statusText,url:i,elapsedMs:Date.now()-b}}catch(b){let a=b?.name==="AbortError"?"Proxy test timed out":function(a){if(!a)return"Unknown error";let b=a?.message||String(a),c=a?.cause?.code||a?.code,d=a?.cause?.message;return d&&d!==b?c?`${b}: ${d} (${c})`:`${b}: ${d}`:c&&!b.includes(c)?`${b} (${c})`:b}(b);return{ok:!1,status:500,error:a}}finally{clearTimeout(c)}}finally{try{await g?.close?.()}catch{}}}';
+
+  const out = patchProxyTest(sample);
+  if (!out) return "proxy test patch did not match the route anchors";
+  if (!out.includes(PROXY_TEST_MARK)) return "proxy test patch did not install the probe helper";
+  if (!out.includes('indexOf("://")<0')) return "proxy test patch did not normalize the proxy URL";
+  if (!out.includes("Math.min(j,3e4):2e4")) return "proxy test patch did not raise the default timeout";
+  if (patchProxyTest(out) !== null) return "proxy test patch is not idempotent";
+  try {
+    new Function(out);
+  } catch (err) {
+    return "proxy test patch produced invalid JavaScript: " + err.message;
+  }
+
+  const make = plan => {
+    const state = { agents: [], methods: [] };
+    const undici = {
+      ProxyAgent: class {
+        constructor(opts) {
+          if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(String(opts.uri))) throw new Error("Invalid URL");
+          this.uri = opts.uri;
+          this.insecure = !!(opts.requestTls && opts.requestTls.rejectUnauthorized === false);
+          state.agents.push(this);
+        }
+        async close() {}
+      },
+      fetch: async (url, opts) => {
+        const index = state.methods.length;
+        state.methods.push(opts.method);
+        const step = plan[index];
+        if (!step) throw new Error("unexpected fetch call " + index);
+        if (step.error) throw step.error;
+        return { ok: step.ok !== false, status: step.status || 200, statusText: "OK", body: null };
+      }
+    };
+    const fn = new Function("c", out + ";return f;")(() => undici);
+    return { state, run: args => fn(args) };
+  };
+
+  const bare = make([{ ok: true }]);
+  const bareResult = await bare.run({ proxyUrl: "60.12.215.23:7302" });
+  if (!bareResult.ok) return "proxy test patch rejected a bare host:port proxy URL";
+  if (bare.state.agents[0].uri !== "http://60.12.215.23:7302") return "proxy test patch did not prefix the missing scheme";
+
+  const fallback = make([{ ok: false, status: 403 }, { ok: true }]);
+  const fallbackResult = await fallback.run({ proxyUrl: "http://1.2.3.4:8080" });
+  if (!fallbackResult.ok) return "proxy test patch did not fall back to GET after a failed HEAD";
+  if (fallback.state.methods.join(",") !== "HEAD,GET") return "proxy test patch ran the wrong request methods";
+  if (fallback.state.agents[0].uri !== "http://1.2.3.4:8080") return "proxy test patch rewrote an URL that already had a scheme";
+
+  const tlsError = new Error("fetch failed");
+  tlsError.cause = { code: "DEPTH_ZERO_SELF_SIGNED_CERT", message: "self-signed certificate" };
+  const insecure = make([{ error: tlsError }, { ok: true }]);
+  const insecureResult = await insecure.run({ proxyUrl: "2.27.154.28:3128" });
+  if (!insecureResult.ok) return "proxy test patch did not retry a self-signed proxy insecurely";
+  if (!insecure.state.agents[1] || insecure.state.agents[1].insecure !== true) return "proxy test patch retried with a verifying agent";
+  if (insecure.state.methods.join(",") !== "HEAD,HEAD") return "proxy test patch retried the wrong request method";
+
+  const abort = new Error("aborted");
+  abort.name = "AbortError";
+  const timedOut = make([{ error: abort }]);
+  const timedOutResult = await timedOut.run({ proxyUrl: "1.2.3.4:8080" });
+  if (timedOutResult.ok !== false) return "proxy test patch reported an aborted probe as ok";
+  if (timedOut.state.agents.length !== 1) return "proxy test patch retried an aborted probe insecurely";
+
+  if (patchProxyTest("const x = 1;") !== null) return "proxy test patch modified a file without the route";
+  return null;
 }
 
-function start() {
+async function selfTest() {
+  return (
+    testInjector() ||
+    testProviderPatch() ||
+    testVersionPatch() ||
+    testRelayPatch() ||
+    testSessionPatch() ||
+    (await testProxyTest())
+  );
+}
+
+async function start() {
   const result = run();
 
   if (!result.ok) {
@@ -615,7 +758,7 @@ function start() {
     process.exit(1);
   }
 
-  const fail = selfTest();
+  const fail = await selfTest();
   if (fail) {
     console.error("ERROR: opencode patch self-test failed: " + fail);
     process.exit(1);
@@ -624,10 +767,13 @@ function start() {
   const ver = result.version ? ` 9router=${result.version}` : "";
   const written = result.files.length ? " files=" + result.files.join(",") : "";
   console.log(
-    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} session=${result.applied.session} (${result.applied.changed} chunk(s) written)${ver}${written}`
+    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} session=${result.applied.session} proxyTest=${result.applied.proxyTest} (${result.applied.changed} chunk(s) written)${ver}${written}`
   );
   if (!result.state.session) {
     console.warn("WARN: opencode session cache anchor not found; a 429 still needs a manual restart");
+  }
+  if (result.state.proxyTestTarget && !result.state.proxyTest) {
+    console.warn("WARN: proxy pool test route anchor not found; bare host:port proxies will still fail the dashboard test");
   }
 
   spawnServer();
@@ -666,18 +812,20 @@ function runChild(cmd) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, testRelayPatch, testSessionPatch, patchProvider, patchVersion, patchRelay, patchSession };
+module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, testRelayPatch, testSessionPatch, testProxyTest, patchProvider, patchVersion, patchRelay, patchSession, patchProxyTest };
 
 if (require.main === module) {
   if (process.argv[2] === "--start") start();
   else {
-    const result = run();
-    const fail = selfTest();
-    console.log(JSON.stringify({ ...result, selfTest: fail || "ok" }, null, 2));
-    if (fail) process.exit(1);
-    if (!result.ok) {
-      console.error("ERROR: opencode patch skipped: " + result.reason);
-      process.exit(1);
-    }
+    (async () => {
+      const result = run();
+      const fail = await selfTest();
+      console.log(JSON.stringify({ ...result, selfTest: fail || "ok" }, null, 2));
+      if (fail) process.exit(1);
+      if (!result.ok) {
+        console.error("ERROR: opencode patch skipped: " + result.reason);
+        process.exit(1);
+      }
+    })();
   }
 }
