@@ -16,17 +16,9 @@ const HELPER_SRC = `function _injectQ4(b){if(!b||typeof b!=="object")return;b.st
 const TOOLS_MARK = "let _Q4=[";
 const TOOLS_INSERT = `let _Q4=${JSON.stringify(Q4_TOOLS)};` + HELPER_SRC;
 
-const ROUTING_OLD = 'u=new Set(["union-alpha"])';
-const ROUTING_NEW = 'u=new Set(["union-alpha","union-alpha-free"])';
-// Variasi fallback pattern routing - mencoba berbagai format minified
-const ROUTING_OLD_VARIANTS = [
-  'w=new Set(["union-alpha"])',      // variabel w
-  'let u=new Set(["union-alpha"])',   // dengan let
-  'u=new Set("union-alpha")',         // tanpa bracket kedua
-  'new Set(["union-alpha"])',         // tanpa kata kunci variabel
-];
-const TR_OLD = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)';
-const TR_NEW = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&(b.model==="union-alpha-free"&&(b.model="union-alpha"),!b.model&&(b.model=a)),b&&"object"==typeof b&&(b.stream=!0),_injectQ4(b)';
+const ROUTING_RE = /new Set\(\[([^\]]*"union-alpha"[^\]]*)\]\)/;
+
+const TR_OLD_RE = /transformRequest\((\w+),(\w+),(\w+),(\w+)\)\{((?:(?:var|let|const)\s+[^;{}]+;\s*)*)if\(\2&&"object"==typeof \2&&\1&&!\2\.model&&\(\2\.model=\1\),\2&&"object"==typeof \2&&\(\2\.stream=!0\)/;
 
 const CATALOG_ANCHORS = [
   ['{id:"union-alpha",name:"Union Alpha",supportedFormats:["claude"]}', '{id:"union-alpha-free",name:"Union Alpha Free",supportedFormats:["claude"]}'],
@@ -123,24 +115,28 @@ function patchTools(src) {
 }
 
 function patchProvider(src) {
-  if (!src.includes(TR_OLD) && !src.includes("_injectQ4(b)")) return null;
+  if (!src.includes('super("opencode"')) return null;
+
   let out = src;
-  // Coba patch routing dengan berbagai varian pattern
-  let routingPatched = false;
-  for (const pattern of ROUTING_OLD_VARIANTS) {
-    if (out.includes(pattern)) {
-      out = out.replace(pattern, ROUTING_NEW);
-      routingPatched = true;
-      break;
-    }
+
+  out = out.replace(ROUTING_RE, (match, inner) => {
+    if (inner.includes('"union-alpha-free"')) return match;
+    return `new Set([${inner.replace('"union-alpha"', '"union-alpha","union-alpha-free"')}])`;
+  });
+  if (!out.includes('"union-alpha-free"')) return null;
+
+  const at = out.indexOf('super("opencode"');
+  const head = out.slice(0, at);
+  const tail = out.slice(at);
+  if (!tail.includes(",_injectQ4(")) {
+    if (!TR_OLD_RE.test(tail)) return null;
+    out = head + tail.replace(TR_OLD_RE, (match, model, body, c, d, prelude) =>
+      `transformRequest(${model},${body},${c},${d}){${prelude}if(${body}&&"object"==typeof ${body}&&${model}&&(${body}.model==="union-alpha-free"&&(${body}.model="union-alpha"),!${body}.model&&(${body}.model=${model})),${body}&&"object"==typeof ${body}&&(${body}.stream=!0),_injectQ4(${body})`
+    );
   }
-  // Jika tidak ditemukan varian sama sekali, coba check apakah sudah ada ROUTING_NEW
-  if (!routingPatched && !out.includes(ROUTING_NEW)) return null;
-  const tools = patchTools(out);
-  if (tools === null || tools === out) return out === src ? null : out;
-  out = tools;
-  if (out.includes(TR_OLD)) out = out.replace(TR_OLD, TR_NEW);
-  else if (!out.includes("_injectQ4(b)")) return null;
+
+  out = patchTools(out);
+
   return out === src ? null : out;
 }
 
@@ -162,8 +158,6 @@ function patchVersion(src) {
   if (src.includes(VERSION_DONE)) return null;
   if (!src.includes(VERSION_OLD)) return null;
   const out = src.replace(VERSION_OLD, VERSION_NEW);
-  // Catat bahwa patch versi sudah diterapkan (mencegah banner "New version available")
-  // Catatan: Patch ini tidak memengaruhi rate limit 429 dari OpenCode free tier
   return out;
 }
 
@@ -191,7 +185,7 @@ function run(options = {}) {
 
     if (out !== src) pending.push([file, out]);
 
-    if (out.includes(ROUTING_NEW) && out.includes("_injectQ4(b)")) state.provider = true;
+    if (out.includes('"union-alpha-free"') && /,_injectQ4\(\w+\)/.test(out)) state.provider = true;
     if (out.includes(CATALOG_ANCHORS[0][1]) || out.includes(CATALOG_ANCHORS[1][1])) state.catalog = true;
     if (out.includes(CAP_FREE)) state.capabilities = true;
     if (out.includes(VERSION_DONE)) state.version = true;
@@ -274,6 +268,40 @@ function testInjector() {
   return null;
 }
 
+function testProviderPatch() {
+  const cases = [
+    [
+      "var prelude",
+      'let y=new Set(["union-alpha"]);class M extends f.H{constructor(){super("opencode",g.xq.opencode)}transformRequest(a,b,c,d){var e;if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0),L(a||b?.model)&&b&&"object"==typeof b){let z=1}}}'
+    ],
+    [
+      "no prelude",
+      'let u=new Set(["union-alpha"]);class M extends f.H{constructor(){super("opencode",g.xq.opencode)}transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0),L(a||b?.model)&&b&&"object"==typeof b){let z=1}}}'
+    ],
+    [
+      "renamed parameters",
+      'let y=new Set(["union-alpha"]);class M extends f.H{constructor(){super("opencode",g.xq.opencode)}transformRequest(x,y,z,w){var q;if(y&&"object"==typeof y&&x&&!y.model&&(y.model=x),y&&"object"==typeof y&&(y.stream=!0),L(x||y?.model)&&y&&"object"==typeof y){let z=1}}}'
+    ]
+  ];
+  for (const [label, src] of cases) {
+    const out = patchProvider(src);
+    if (!out) return `provider patch (${label}) did not match the anchors`;
+    if (!out.includes('"union-alpha-free"')) return `provider patch (${label}) did not add union-alpha-free to the routing Set`;
+    if (out.includes("=u=new Set")) return `provider patch (${label}) corrupted the routing assignment`;
+    if (!out.includes('.model==="union-alpha-free"')) return `provider patch (${label}) did not map union-alpha-free back to union-alpha`;
+    if (!/,_injectQ4\(\w+\)/.test(out)) return `provider patch (${label}) did not inject the tool helper call`;
+    try {
+      new Function(out);
+    } catch (err) {
+      return `provider patch (${label}) produced invalid JavaScript: ${err.message}`;
+    }
+    if (patchProvider(out) !== null) return `provider patch (${label}) is not idempotent`;
+  }
+  const other = 'class X extends f.H{constructor(){super("huggingface")}transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0),1){}}}';
+  if (patchProvider(other) !== null) return "provider patch modified an unrelated provider";
+  return null;
+}
+
 function testVersionPatch() {
   const src = `(function(){${VERSION_OLD}})`;
   const out = patchVersion(src);
@@ -294,7 +322,7 @@ function testVersionPatch() {
 }
 
 function selfTest() {
-  return testInjector() || testVersionPatch();
+  return testInjector() || testProviderPatch() || testVersionPatch();
 }
 
 function start() {
@@ -353,7 +381,7 @@ function runChild(cmd) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testVersionPatch, patchVersion };
+module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, patchProvider, patchVersion };
 
 if (require.main === module) {
   if (process.argv[2] === "--start") start();

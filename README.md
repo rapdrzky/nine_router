@@ -57,7 +57,7 @@ CMD ["node", "/app/patch_opencode_nine_router.js", "--start"]
 
 `patch_opencode_nine_router.js` runs before the server starts and rewrites the installed 9Router build in place:
 
-- Scans `server/**/*.js` for the provider, catalog, capability and version-route anchors instead of hard-coding chunk file names, so an upstream chunk renumbering does not silently skip a copy of the module.
+- Scans `server/**/*.js` for the provider, catalog, capability and version-route anchors instead of hard-coding chunk file names, so an upstream chunk renumbering does not silently skip a copy of the module. The provider is located by its `super("opencode"` declaration, and the routing `Set` / `transformRequest` are matched by shape, so minifier renames of the Set variable or parameter names (and extra statements such as `var e;`) do not break the patch.
 - Adds `union-alpha-free` to the routing set, the provider model list and the capability map. It deliberately stays out of the responses-format set: `OpenCodeExecutor.buildUrl()` tests `isResponsesModel()` before `isMessagesModel()`, so a responses classification would send this claude-format model to `/zen/v1/responses`.
 - Rewrites the `opencode` `transformRequest` body so `union-alpha-free` maps to `union-alpha`, forces `stream: true`, and calls `_injectQ4(b)`.
 - Installs the `_injectQ4` helper, which fills `body.tools` with the `bash`, `glob`, `grep` and `read` definitions when absent and never overwrites a tool the client already sent.
@@ -73,7 +73,7 @@ A healthy start logs:
 opencode patch: provider=… catalog=… capabilities=… version=… (N chunk(s) written) 9router=<version> files=<paths>
 ```
 
-The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, plus the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses).
+The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, the provider patch against both new and legacy minified shapes (with and without a `var` prelude, and with renamed parameters), and the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses).
 
 Standalone usage:
 
@@ -88,7 +88,7 @@ node -e "console.log(require('./patch_opencode_nine_router.js').selfTest() || 'o
 Change the image tag and digest in the `Dockerfile`, redeploy, and update the version badge in this README. Currently pinned:
 
 ```dockerfile
-FROM decolua/9router:0.5.109@sha256:28474ba417ac76198abce43b6758b187201e0acac364f72ff3918b0f7e11b040
+FROM decolua/9router:0.5.116@sha256:12086f97857f784ab7762e95595f70d71279a7a60c800af0f100183e8da7ea36
 ```
 
 Upgrade to:
