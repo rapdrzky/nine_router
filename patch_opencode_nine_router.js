@@ -55,6 +55,14 @@ const VERSION_DONE = "hasUpdate:!1";
 
 const PROXY_FIX_MARK = "proxyCapable";
 
+// Full opencode-executor `execute` method on the real 0.5.116 build:
+//   async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})})}
+// The rewritten form folds in (1) the proxy-capable adapter that forwards the
+// resolved proxy URL, (2) status-based session eviction on 429/403, and (3)
+// preemptive session rotation (rotate before the free-tier wall, not after).
+const EXEC_FULL_OLD = 'async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})})}';
+const EXEC_FULL_NEW = 'async execute(a){let b=this.prepareRequestCredentials(a);if(!globalThis.__ocFr)globalThis.__ocFr={m:new Map};let __sid=b&&b._opencodeSession;if(__sid){let __n=(globalThis.__ocFr.m.get(__sid)||0)+1;globalThis.__ocFr.m.set(__sid,__n);if(__n>=(Number(process.env.OPENCODE_SESSION_MAX_USES)||8))_forgetQ4Session(__sid,429)}const c=(t,e,f)=>r(t,{method:e.method,headers:e.headers,body:e.body},{signal:e.signal,proxyUrl:f});c.proxyCapable=!0;let _oc9r=await super.execute({...a,credentials:b,directFetch:c});try{_forgetQ4Session(b&&b._opencodeSession,_oc9r&&_oc9r.response&&_oc9r.response.status)}catch{}return _oc9r}';
+
 const PROXY_CLASS_RE = /class (\w+) extends [\w.$]+\.H\{constructor\(\)\{super\("opencode"/;
 
 const PROXY_EXEC_RE = /async execute\((\w+)\)\{let (\w+)=this\.prepareRequestCredentials\(\1\);return super\.execute\(\{\.\.\.\1,credentials:\2,directFetch:\((\w+),(\w+)\)=>(\w+)\(\1,\{method:\4\.method,headers:\4\.headers,body:\4\.body\},\{signal:\4\.signal\}\)\}\);/;
@@ -202,52 +210,27 @@ function patchSession(src) {
   while ((store = SESSION_STORE_RE.exec(window)) && stores.length < 2) stores.push(store[1]);
   if (stores.length < 2) return null;
 
-  const exec = SESSION_EXEC_RE.exec(src.slice(cls.index));
-  if (!exec) return null;
-
-  const prefix = exec[0];
-  const arg = exec[1];
-  const credentials = exec[2];
-  const execIndex = cls.index + exec.index;
-  const callStart = execIndex + prefix.length;
-  const callEnd = scanCallEnd(src, callStart);
-  if (callEnd < 0 || src[callEnd] !== "}") return null;
-  const call = src.slice(callStart, callEnd);
-
-  const result = uniqueName(src, "_oc9r");
-  const patched =
-    `${prefix.replace(/return $/, "")}` +
-    `let ${result}=await ${call};` +
-    `try{_forgetQ4Session(${credentials}&&${credentials}._opencodeSession,${result}&&${result}.response&&${result}.response.status)}catch{}` +
-    `return ${result}}`;
-
-  let out = src.slice(0, execIndex) + patched + src.slice(callEnd + 1);
-
+  // Only inject the eviction helper. The `execute` rewrite (proxy adapter +
+  // status eviction + preemptive rotation) is done by patchFreeLaneProxyExecutor,
+  // which must run on the untouched method shape — so we must NOT rewrite it here.
   const helper =
     `function _forgetQ4Session(a,b){if(!a||(429!==b&&403!==b))return!1;let c=!1;` +
     `for(let d of [${stores.join(",")}]){for(let e of d){let f=e[1];` +
     `if(f&&f.sessionId===a){d.delete(e[0]);c=!0}}}return c}`;
-  out = out.slice(0, cls.index) + helper + out.slice(cls.index);
 
+  const out = src.slice(0, cls.index) + helper + src.slice(cls.index);
   return out === src ? null : out;
 }
 
 // ─── Free-lane proxy transport backport (9router a76c2afc) ─────────────────
 
 function patchFreeLaneProxyExecutor(src) {
-  if (src.includes(PROXY_FIX_MARK)) return null;
-  const cls = PROXY_CLASS_RE.exec(src);
-  if (!cls) return null;
-  const clsIndex = cls.index;
-  const window = src.slice(clsIndex, clsIndex + 12000);
-  const execOld = 'async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})';
-  const execNew = 'async execute(a){let b=this.prepareRequestCredentials(a);const c=(t,e,f)=>r(t,{method:e.method,headers:e.headers,body:e.body},{signal:e.signal,proxyUrl:f});c.proxyCapable=!0;return super.execute({...a,credentials:b,directFetch:c';
-  if (!window.includes(execOld)) return null;
-  const next = window.replace(execOld, execNew);
-  if (next === window) return null;
-  const out = src.slice(0, clsIndex) + next + src.slice(clsIndex + window.length);
-  if (!out.includes(PROXY_FIX_MARK)) return null;
-  return out;
+  if (src.includes(EXEC_FULL_NEW)) return null;
+  if (!src.includes(EXEC_FULL_OLD)) return null;
+  const next = src.replace(EXEC_FULL_OLD, EXEC_FULL_NEW);
+  if (next === src) return null;
+  if (!next.includes(PROXY_FIX_MARK)) return null;
+  return next;
 }
 
 function patchProxyFetchAdapter(src) {
@@ -277,7 +260,8 @@ function patchTlsSessionCache(src) {
     'const sessionsByProxy=new Map;const SESSIONS_MAX=8;class p extends Error{constructor(a){super(a),this.name="OpencodeTlsUnavailableError"}};' +
     'function normalizeProxyKey(a){let b=String(a??"").trim();if(!b)return"";try{let c=new URL(b);let d=c.port?": "+c.port:"";return c.protocol+"/"+c.hostname+d}catch{return b}}' +
     'async function buildSession(a){let b=await (0,n.A)("wreq-js");if("function"!=typeof b.createSession)throw Error("wreq-js runtime is missing createSession");let c=await b.createSession({emulation:{tlsOptions:{cipherList:"' + clMatch[1] + '"}}});if(a){c.proxy=a}return Object.assign(c,{__proxyKey:normalizeProxyKey(a)})}' +
-    'async function loadSession(a=""){let b=normalizeProxyKey(a);if(!sessionsByProxy.has(b)){if(sessionsByProxy.size>=SESSIONS_MAX){let c=sessionsByProxy.keys().next().value;let d=sessionsByProxy.get(c);sessionsByProxy.delete(c);d.then((e)=>e.close?.()).catch(()=>{})}let e=buildSession(a).catch((f)=>{sessionsByProxy.delete(b);throw f});sessionsByProxy.set(b,e)}return sessionsByProxy.get(b)}';
+    'async function loadSession(a=""){let b=normalizeProxyKey(a);if(!sessionsByProxy.has(b)){if(sessionsByProxy.size>=SESSIONS_MAX){let c=sessionsByProxy.keys().next().value;let d=sessionsByProxy.get(c);sessionsByProxy.delete(c);d.then((e)=>e.close?.()).catch(()=>{})}let e=buildSession(a).catch((f)=>{sessionsByProxy.delete(b);throw f});sessionsByProxy.set(b,e)}return sessionsByProxy.get(b)}' +
+    'function bunHop(a,b={},o={}){return new Promise((q)=>{let cp;try{cp=(0,c(31421).spawn)(process.env.OPENCODE_BUN_BIN||"bun",[process.env.OPENCODE_BUN_HOP||"/app/bun-hop.mjs"],{stdio:["pipe","pipe","inherit"]})}catch(e){q(Promise.reject(e));return}let z=JSON.stringify({url:a,method:b.method||"GET",headers:b.headers||{},body:"string"==typeof b.body?b.body:(b.body?JSON.stringify(b.body):void 0),proxy:o.proxyUrl||void 0,timeoutMs:o.timeoutMs||120000});cp.stdin.write(z);cp.stdin.end();let buf=Buffer.alloc(0),hdone=!1,st=0,ss="",hs={};cp.stdout.on("data",(d)=>{buf=Buffer.concat([buf,d]);if(!hdone){let nl=buf.indexOf(10);if(nl>=0){hdone=!0;try{let j=JSON.parse(buf.slice(0,nl).toString("utf8"));st=j.status;ss=j.statusText;hs=j.headers||{}}catch{}buf=buf.slice(nl+1)}}});cp.on("error",(e)=>q(Promise.reject(e)));cp.on("close",()=>q(new Response(new Uint8Array(buf),{status:st,statusText:ss,headers:hs})))})}';
   let out = src.replace(declOld, tlsBlock);
   const startAnchor = "async function q(){return o||";
   const start = out.indexOf(startAnchor);
@@ -287,7 +271,7 @@ function patchTlsSessionCache(src) {
   const qNew = 'async function q(a=""){return loadSession(a)}';
   let next = out.slice(0, start) + qNew + out.slice(end);
   const sigOld = 'async function r(a,b={},{signal:c,timeoutMs:d=12e4}={}){let e;try{e=await q()}catch(a){';
-  const sigNew = 'async function r(a,b={},{signal:c,timeoutMs:d=12e4,proxyUrl:pu=""}={}){let e;try{e=await q(pu)}catch(a){';
+  const sigNew = 'async function r(a,b={},{signal:c,timeoutMs:d=12e4,proxyUrl:pu=""}={}){if("bun"===(process.env.OPENCODE_TLS_ENGINE||""))return bunHop(a,b,{signal:c,timeoutMs:d,proxyUrl:pu});let e;try{e=await q(pu)}catch(a){';
   if (!next.includes(sigOld)) return null;
   next = next.replace(sigOld, sigNew);
   const tailOld = 'let g=await e.fetch(a,f),h={};return g.headers?.forEach?.((a,b)=>{h[b]=a}),new Response(g.body,{status:g.status,statusText:g.statusText,headers:h})}';
@@ -539,9 +523,9 @@ function testSessionPatch() {
   if (!out.includes("for(let d of [E,I])")) return "session patch did not bind the two session stores";
   if (!out.includes("_opencodeSession")) return "session patch dropped the session field lookup";
   if (!out.includes("429!==b&&403!==b")) return "session patch dropped the status gate";
-  if (out.includes("return super.execute({...a,credentials:b,directFetch")) return "session patch still returns the raw opencode executor call";
-  if (out.split("let _oc9r=").length !== 2) return "session patch touched more than one executor";
-  if (out.indexOf("let _oc9r=") < out.indexOf("class M extends")) return "session patch modified the foreign executor";
+  // The proxy executor patch must still be able to match the untouched execute
+  // method, so the session patch must not rewrite it.
+  if (!out.includes('directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})')) return "session patch rewrote the execute method (breaks the proxy patch)";
   if (patchSession(out) !== null) return "session patch is not idempotent";
   try {
     new Function(out);
@@ -586,12 +570,14 @@ function testFreeLaneProxy() {
   // cache must be keyed by proxy URL.
 
   const execSample = [
-    'class M extends f.H{constructor(){super("opencode",g.xq.opencode)}async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})});}}',
+    'class M extends f.H{constructor(){super("opencode",g.xq.opencode)}async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})})}}',
   ].join("\n");
   const execPatched = patchFreeLaneProxyExecutor(execSample);
   if (!execPatched) return "free-lane proxy patch (executor) did not match the anchors";
   if (!execPatched.includes("proxyCapable")) return "free-lane proxy patch (executor) did not mark the adapter proxy-capable";
   if (!execPatched.includes("proxyUrl:f")) return "free-lane proxy patch (executor) did not forward the proxy URL";
+  if (!execPatched.includes("_forgetQ4Session(b&&b._opencodeSession")) return "free-lane proxy patch (executor) did not install the session-eviction call";
+  if (!execPatched.includes("OPENCODE_SESSION_MAX_USES")) return "free-lane proxy patch (executor) did not install preemptive session rotation";
   if (patchFreeLaneProxyExecutor(execPatched) !== null) return "free-lane proxy patch (executor) is not idempotent";
 
   const fetchSample = [

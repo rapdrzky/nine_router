@@ -15,6 +15,13 @@ RUN (command -v npm >/dev/null 2>&1 || apk add --no-cache npm) \
   && mkdir -p /app/node_modules \
   && cp -r node_modules/. /app/node_modules/
 
-COPY patch_opencode_nine_router.js patch_proxy_nine_router.js /app/
+# Optional Bun transport hop (OpenCode free lane). Bun's BoringSSL TLS stack
+# passes the free-tier fingerprint gate even when wreq-js cannot. Best-effort:
+# if the install fails the build still succeeds and the wreq-js path is used.
+RUN (apk add --no-cache curl >/dev/null 2>&1; \
+    curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 \
+      && ln -sf /root/.bun/bin/bun /usr/local/bin/bun) || true
+
+COPY patch_opencode_nine_router.js patch_proxy_nine_router.js bun-hop.mjs /app/
 
 CMD ["node", "/app/patch_opencode_nine_router.js", "--start"]
