@@ -30,6 +30,50 @@ const CAP_NEW = '"union-alpha":{vision:!0,reasoning:!0,thinkingFormat:"anthropic
 const CAP_MUSE = '"muse-spark-1.2-contributor-free":{vision:!0,reasoning:!0,thinkingFormat:"openai",contextWindow:1048576,maxOutput:131072}';
 const CAP_FREE = '"union-alpha-free":{vision:!0,reasoning:!0,thinkingFormat:"anthropic",contextWindow:262144,maxOutput:131072}';
 
+const RELAY_MARK = "relayClientIp";
+
+const RELAY_RULES = [
+  {
+    anchor: 'newRequestInit.headers.delete("host");',
+    insert:
+      'newRequestInit.headers.delete("host");\n' +
+      '    const relayClientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";\n' +
+      '    if (relayClientIp) {\n' +
+      '      newRequestInit.headers.set("x-forwarded-for", relayClientIp);\n' +
+      '      newRequestInit.headers.set("x-real-ip", relayClientIp);\n' +
+      '    }'
+  },
+  {
+    anchor: 'newHeaders.delete("host");',
+    insert:
+      'newHeaders.delete("host");\n' +
+      '  const relayClientIp = request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip") || "";\n' +
+      '  if (relayClientIp) {\n' +
+      '    newHeaders.set("x-forwarded-for", relayClientIp);\n' +
+      '    newHeaders.set("x-real-ip", relayClientIp);\n' +
+      '  }'
+  },
+  {
+    anchor: 'delete rawHeaders["host"];',
+    insert:
+      'delete rawHeaders["host"];\n\n' +
+      '  const relayClientIp = req.headers.get("x-vercel-forwarded-for") || req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for") || "";\n' +
+      '  if (relayClientIp) {\n' +
+      '    rawHeaders["x-forwarded-for"] = relayClientIp;\n' +
+      '    rawHeaders["x-real-ip"] = relayClientIp;\n' +
+      '  }'
+  },
+  {
+    anchor: /for \(const k of Object\.keys\(forwardHeaders\)\) \{[\s\S]*?\n  \}/,
+    insert:
+      '\n  const relayClientIp = headers["x-nf-client-connection-ip"] || headers["client-ip"] || headers["x-real-ip"] || headers["x-forwarded-for"] || "";\n' +
+      '  if (relayClientIp) {\n' +
+      '    forwardHeaders["x-forwarded-for"] = relayClientIp;\n' +
+      '    forwardHeaders["x-real-ip"] = relayClientIp;\n' +
+      '  }'
+  }
+];
+
 const VERSION_OLD = `async function i(){let a=await h(),b=f.rE,c=!!a&&function(a,b){let c=a.split(".").map(Number),d=b.split(".").map(Number);for(let a=0;a<3;a++){if(c[a]>d[a])return 1;if(c[a]<d[a])return -1}return 0}(a,b)>0;return Response.json({currentVersion:b,latestVersion:a,hasUpdate:c})}`;
 const VERSION_NEW = `async function i(){let a=f.rE;return Response.json({currentVersion:a,latestVersion:a,hasUpdate:!1})}`;
 const VERSION_DONE = "hasUpdate:!1";
@@ -161,9 +205,26 @@ function patchVersion(src) {
   return out;
 }
 
+function patchRelay(src) {
+  if (!src.includes('"x-relay-target"')) return null;
+  if (src.includes(RELAY_MARK)) return null;
+
+  let out = src;
+  for (const rule of RELAY_RULES) {
+    if (typeof rule.anchor === "string") {
+      if (!out.includes(rule.anchor)) continue;
+      out = out.replace(rule.anchor, rule.insert);
+    } else {
+      if (!rule.anchor.test(out)) continue;
+      out = out.replace(rule.anchor, m => m + rule.insert);
+    }
+  }
+  return out === src ? null : out;
+}
+
 function run(options = {}) {
-  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, changed: 0 };
-  const state = { provider: false, catalog: false, capabilities: false, version: false };
+  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, changed: 0 };
+  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false };
   const files = [];
   const pending = [];
 
@@ -182,6 +243,8 @@ function run(options = {}) {
     if (capabilities) { out = capabilities; applied.capabilities++; }
     const version = patchVersion(out);
     if (version) { out = version; applied.version++; }
+    const relay = patchRelay(out);
+    if (relay) { out = relay; applied.relay++; }
 
     if (out !== src) pending.push([file, out]);
 
@@ -189,6 +252,8 @@ function run(options = {}) {
     if (out.includes(CATALOG_ANCHORS[0][1]) || out.includes(CATALOG_ANCHORS[1][1])) state.catalog = true;
     if (out.includes(CAP_FREE)) state.capabilities = true;
     if (out.includes(VERSION_DONE)) state.version = true;
+    if (out.includes(RELAY_MARK)) state.relay = true;
+    if (src.includes('"x-relay-target"')) state.relayTemplates = true;
   }
 
   const missing = [];
@@ -196,6 +261,7 @@ function run(options = {}) {
   if (!state.catalog) missing.push("opencode provider model list (union-alpha entry)");
   if (!state.capabilities) missing.push("model capability map (union-alpha entry)");
   if (!state.version) missing.push("version route (npm update-check response)");
+  if (state.relayTemplates && !state.relay) missing.push("proxy pool relay templates (client IP forwarding)");
   if (missing.length) return { ok: false, reason: "anchors not found: " + missing.join("; "), applied, files };
 
   for (const [file, out] of pending) {
@@ -321,8 +387,84 @@ function testVersionPatch() {
   return null;
 }
 
+function testRelayPatch() {
+  const cases = [
+    {
+      label: "cloudflare",
+      src: [
+        "export default {",
+        "  async fetch(request, env, ctx) {",
+        '    const target = request.headers.get("x-relay-target");',
+        "    const newRequestInit = { method: request.method, headers: new Headers(request.headers) };",
+        '    newRequestInit.headers.delete("host");',
+        "    try {",
+        "  },",
+        "};"
+      ].join("\n"),
+      need: ['cf-connecting-ip', 'newRequestInit.headers.set("x-forwarded-for", relayClientIp)']
+    },
+    {
+      label: "deno",
+      src: [
+        "Deno.serve(async (request) => {",
+        '  const target = request.headers.get("x-relay-target");',
+        "  const newHeaders = new Headers(request.headers);",
+        '  newHeaders.delete("host");',
+        "  try {",
+        "});"
+      ].join("\n"),
+      need: ['x-forwarded-for", relayClientIp', 'newHeaders.set("x-real-ip", relayClientIp)']
+    },
+    {
+      label: "vercel",
+      src: [
+        "export default async function handler(req) {",
+        '  const target = req.headers.get("x-relay-target");',
+        "  const rawHeaders = {};",
+        '  delete rawHeaders["host"];',
+        "  const response = await fetch(target);",
+        "}"
+      ].join("\n"),
+      need: ['x-vercel-forwarded-for', 'rawHeaders["x-real-ip"] = relayClientIp']
+    },
+    {
+      label: "netlify",
+      src: [
+        "exports.handler = async (event) => {",
+        '  const target = event.headers["x-relay-target"];',
+        "  const forwardHeaders = { ...event.headers };",
+        "  for (const k of Object.keys(forwardHeaders)) {",
+        "    const lower = k.toLowerCase();",
+        '    if (lower === "x-relay-target" || lower === "host") {',
+        "      delete forwardHeaders[k];",
+        "    }",
+        "  }",
+        "  try {",
+        "};"
+      ].join("\n"),
+      need: ['x-nf-client-connection-ip', 'forwardHeaders["x-forwarded-for"] = relayClientIp']
+    }
+  ];
+
+  for (const c of cases) {
+    const out = patchRelay(c.src);
+    if (!out) return `relay patch (${c.label}) did not match the template anchor`;
+    for (const token of c.need) {
+      if (!out.includes(token)) return `relay patch (${c.label}) missing ${token}`;
+    }
+    if (out.includes("`") || out.includes("${")) return `relay patch (${c.label}) broke the template literal`;
+    if (patchRelay(out) !== null) return `relay patch (${c.label}) is not idempotent`;
+  }
+
+  const plain = "const x = 1;";
+  if (patchRelay(plain) !== null) return "relay patch modified a file without relay templates";
+  const other = 'newHeaders.delete("host");const y=2;';
+  if (patchRelay(other) !== null) return "relay patch modified a non-relay template";
+  return null;
+}
+
 function selfTest() {
-  return testInjector() || testProviderPatch() || testVersionPatch();
+  return testInjector() || testProviderPatch() || testVersionPatch() || testRelayPatch();
 }
 
 function start() {
@@ -342,7 +484,7 @@ function start() {
   const ver = result.version ? ` 9router=${result.version}` : "";
   const written = result.files.length ? " files=" + result.files.join(",") : "";
   console.log(
-    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} (${result.applied.changed} chunk(s) written)${ver}${written}`
+    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} (${result.applied.changed} chunk(s) written)${ver}${written}`
   );
 
   spawnServer();
@@ -381,7 +523,7 @@ function runChild(cmd) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, patchProvider, patchVersion };
+module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, testRelayPatch, patchProvider, patchVersion, patchRelay };
 
 if (require.main === module) {
   if (process.argv[2] === "--start") start();
