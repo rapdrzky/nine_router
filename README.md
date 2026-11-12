@@ -19,6 +19,7 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 - Startup patch makes the Proxy Pool relay templates forward the client IP. Cloudflare strips `cf-connecting-ip` from a Worker's outbound `fetch()`, so free-tier requests sent through a relay reached upstream without any client IP and failed with `429 rate_limit_error: Client IP address is required for free usage`. The patched templates map the platform header (`cf-connecting-ip`, `x-vercel-forwarded-for`, `x-nf-client-connection-ip`) onto `x-forwarded-for` and `x-real-ip`.
 - Startup patch drops a rejected OpenCode session so a 429 does not stick until restart. The free tier limits a session id, and the pinned build caches one id per client identity forever; upstream fixed this in `forgetOpencodeSession()` (v0.5.119), which has no published image yet, so this patch backports the behaviour: a 429 or 403 from the free lane evicts that id and the next request mints a fresh one.
 - Startup patch fixes the Proxy Pool dashboard test. The stock build hands the pool URL straight to `new ProxyAgent({ uri })`, so a proxy entered as `host:port` throws `Invalid URL` and the dashboard reports the pool as failed even though the proxy works. The patched route adds the missing scheme, raises the default probe timeout from 8 s to 20 s, retries a rejected `HEAD` with a `GET`, and retries a self-signed proxy certificate without verification, which is what the request path itself does.
+- Every Proxy Pool change lives in `patch_proxy_nine_router.js`, a separate script that can be run on its own and is also applied by the startup entrypoint.
 - Dashboard for provider setup, quota tracking and API keys.
 - OpenAI-compatible API at `/v1` for any CLI tool or client.
 - Healthcheck on `/api/health`, the only unauthenticated route. `/v1/models` needs an API key, so a probe there returns `401` and Railway restarts the service in a loop.
@@ -41,9 +42,10 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Pinned base image; copies the patch script into `/app` and runs it as the container entrypoint. |
+| `Dockerfile` | Pinned base image; copies the patch scripts into `/app` and runs the entrypoint. |
 | `railway.json` | Railway build and deploy settings, including the healthcheck path. |
 | `patch_opencode_nine_router.js` | Startup entrypoint. With `--start` it applies the opencode patch and then launches 9Router; without arguments it dry-runs the patch and prints JSON. |
+| `patch_proxy_nine_router.js` | Proxy Pool patch: relay client-IP forwarding and the pool test route. Runs standalone or as a library of the entrypoint. |
 | `.env` | Local-only defaults (`PORT`, `INITIAL_PASSWORD`) used by `docker run --env-file`. Never commit production secrets. |
 
 ## Dockerfile
@@ -51,7 +53,7 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 ```dockerfile
 FROM decolua/9router:0.5.116@sha256:12086f97857f784ab7762e95595f70d71279a7a60c800af0f100183e8da7ea36
 
-COPY patch_opencode_nine_router.js /app/
+COPY patch_opencode_nine_router.js patch_proxy_nine_router.js /app/
 
 CMD ["node", "/app/patch_opencode_nine_router.js", "--start"]
 ```
@@ -65,9 +67,8 @@ CMD ["node", "/app/patch_opencode_nine_router.js", "--start"]
 - Rewrites the `opencode` `transformRequest` body so `union-alpha-free` maps to `union-alpha`, forces `stream: true`, and calls `_injectQ4(b)`.
 - Installs the `_injectQ4` helper, which fills `body.tools` with the `bash`, `glob`, `grep` and `read` definitions when absent and never overwrites a tool the client already sent.
 - Rewrites the `/api/version` route handler so it reports `currentVersion === latestVersion` and `hasUpdate: false` without contacting the npm registry. Upstream fetches `registry.npmjs.org/9router/latest` and compares it to the version baked into the build, so a pinned image would otherwise advertise an update it can never install.
-- Rewrites the four Proxy Pool relay templates (`cloudflare-deploy`, `deno-deploy`, `vercel-deploy`, `netlify-deploy`) so each relay copies the platform's client-IP header into the outbound `x-forwarded-for` and `x-real-ip`. Without it the free tier answers `429 Client IP address is required for free usage` whenever a request leaves through a relay. The injected code contains no backticks or `${`, so it cannot break the surrounding template literal.
 - Wraps the `opencode` executor's `execute()` so a `429` or `403` response evicts the session id it used from both session caches, then returns the response untouched. The executor is located as the class whose constructor calls `super("opencode"` so the sibling `opencode-go` executor is never touched, and the two cache maps are captured by their `new Map` plus cleanup-`setInterval` shape rather than by minified name. Client-supplied session ids never enter those caches, so they are never evicted.
-- Rewrites the Proxy Pool test route (`/api/proxy-pools/[id]/test` and `/api/settings/proxy-test`) so a pool entered as `host:port` is tested as an `http://` proxy instead of throwing `Invalid URL`, the default probe timeout is 20 s instead of 8 s, a rejected `HEAD` is retried with a `GET`, and a proxy that intercepts TLS with a self-signed certificate is retried without certificate verification, the same fallback the request path uses. The route is located by its `proxyUrl is required` marker and its `new ProxyAgent({ uri })` call, so minifier renames do not break the patch.
+- Applies the Proxy Pool patch from `patch_proxy_nine_router.js` to every file it scans, so the container still ships one patched build.
 - Writes are two-phase: every file is patched and validated in memory first, and only written (temp file plus rename, so a crash cannot leave a half-written chunk) once all anchors are confirmed present.
 - Re-running is safe. Writes converge: a stale injected block is rewritten in place rather than duplicated.
 
@@ -79,21 +80,39 @@ A healthy start logs:
 opencode patch: provider=… catalog=… capabilities=… version=… relay=… session=… proxyTest=… (N chunk(s) written) 9router=<version> files=<paths>
 ```
 
-The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, the provider patch against both new and legacy minified shapes (with and without a `var` prelude, and with renamed parameters), the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses), the relay patch for all four worker templates (injection present, no backticks or `${` added, idempotent, non-relay files untouched), the session patch (correct executor selected, foreign `opencode-go` executor untouched, eviction behaviour across both caches, status gate, idempotent, patched chunk still parses), and the proxy pool test patch (scheme added to a bare `host:port`, scheme left alone when present, `GET` fallback after a failed `HEAD`, insecure retry after a certificate error, no insecure retry after a timeout, timeout raised, idempotent, patched route still parses).
-
-### Relay workers must be redeployed
-
-The relay patch changes the worker source that the dashboard generates. A worker that is already deployed keeps running its old code, so after this image boots, open **Dashboard → Proxy Pools** and redeploy (or delete and recreate) the pool once. Newly created pools pick up the fix automatically.
-
-If the free tier still answers `429 rate_limit_error` after the relay redeploy, the relay pools are degraded and no source-level fix exists in `v0.5.116`: free-tier quota is keyed to the upstream session, and with `strictProxy` set, `v0.5.116` never passes the selected proxy into the `wreq-js` TLS transport (fixed upstream in `a76c2afc`, not published as an image yet). The session patch above makes a 429 self-heal instead of requiring a restart: the rejected session id is evicted and the next request mints a new one. A restart is only needed when the start log reports `session=0`, which means the session anchor no longer matched this build. A residential SOCKS5/HTTP proxy is still bypassed on the free lane until that upstream fix ships.
+The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, the provider patch against both new and legacy minified shapes (with and without a `var` prelude, and with renamed parameters), the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses), the session patch (correct executor selected, foreign `opencode-go` executor untouched, eviction behaviour across both caches, status gate, idempotent, patched chunk still parses), and the proxy pool patch (see below).
 
 Standalone usage:
 
 ```bash
 node patch_opencode_nine_router.js                      # dry run, prints JSON, writes nothing
 node patch_opencode_nine_router.js --start              # patch, then launch 9Router
-node -e "console.log(require('./patch_opencode_nine_router.js').selfTest() || 'ok')"
+node -e "(async()=>console.log(await require('./patch_opencode_nine_router.js').selfTest() || 'ok'))()"
 ```
+
+## Proxy pool patch
+
+`patch_proxy_nine_router.js` holds every Proxy Pool change, separate from the opencode routing patch:
+
+- Rewrites the four Proxy Pool relay templates (`cloudflare-deploy`, `deno-deploy`, `vercel-deploy`, `netlify-deploy`) so each relay copies the platform's client-IP header into the outbound `x-forwarded-for` and `x-real-ip`. Without it the free tier answers `429 Client IP address is required for free usage` whenever a request leaves through a relay. The injected code contains no backticks or `${`, so it cannot break the surrounding template literal.
+- Rewrites the Proxy Pool test route (`/api/proxy-pools/[id]/test` and `/api/settings/proxy-test`) so a pool entered as `host:port` is tested as an `http://` proxy instead of throwing `Invalid URL`, the default probe timeout is 20 s instead of 8 s, a rejected `HEAD` is retried with a `GET`, and a proxy that intercepts TLS with a self-signed certificate is retried without certificate verification, the same fallback the request path uses. The route is located by its `proxyUrl is required` marker and its `new ProxyAgent({ uri })` call, so minifier renames do not break the patch.
+
+The entrypoint applies this patch on every boot, so nothing extra has to be scheduled. It can also be run on its own, which is useful when only the proxy pools changed:
+
+```bash
+node patch_proxy_nine_router.js                  # patch the build found on this machine
+node patch_proxy_nine_router.js /path/to/build   # patch a specific build
+```
+
+It prints `proxy pool patch: relay=… proxyTest=… (N chunk(s) written) build=…` and is idempotent: a second run writes nothing.
+
+The self-test covers the relay patch for all four worker templates (injection present, no backticks or `${` added, idempotent, non-relay files untouched) and the pool test patch (scheme added to a bare `host:port`, scheme left alone when present, `GET` fallback after a failed `HEAD`, insecure retry after a certificate error, no insecure retry after a timeout, timeout raised, idempotent, patched route still parses).
+
+### Relay workers must be redeployed
+
+The relay patch changes the worker source that the dashboard generates. A worker that is already deployed keeps running its old code, so after this image boots, open **Dashboard → Proxy Pools** and redeploy (or delete and recreate) the pool once. Newly created pools pick up the fix automatically.
+
+If the free tier still answers `429 rate_limit_error` after the relay redeploy, the relay pools are degraded and no source-level fix exists in `v0.5.116`: free-tier quota is keyed to the upstream session, and with `strictProxy` set, `v0.5.116` never passes the selected proxy into the `wreq-js` TLS transport (fixed upstream in `a76c2afc`, not published as an image yet). The session patch above makes a 429 self-heal instead of requiring a restart: the rejected session id is evicted and the next request mints a new one. A restart is only needed when the start log reports `session=0`, which means the session anchor no longer matched this build. A residential SOCKS5/HTTP proxy is still bypassed on the free lane until that upstream fix ships.
 
 ## Upgrading 9Router
 
