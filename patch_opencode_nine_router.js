@@ -18,8 +18,13 @@ const TOOLS_INSERT = `let _Q4=${JSON.stringify(Q4_TOOLS)};` + HELPER_SRC;
 
 const ROUTING_OLD = 'u=new Set(["union-alpha"])';
 const ROUTING_NEW = 'u=new Set(["union-alpha","union-alpha-free"])';
-// Tambahan: coba pattern w=new Set jika u=new Set tidak ditemukan (versi minified berbeda)
-const ROUTING_OLD_FALLBACK = 'w=new Set(["union-alpha"])';
+// Variasi fallback pattern routing - mencoba berbagai format minified
+const ROUTING_OLD_VARIANTS = [
+  'w=new Set(["union-alpha"])',      // variabel w
+  'let u=new Set(["union-alpha"])',   // dengan let
+  'u=new Set("union-alpha")',         // tanpa bracket kedua
+  'new Set(["union-alpha"])',         // tanpa kata kunci variabel
+];
 const TR_OLD = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)';
 const TR_NEW = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&(b.model==="union-alpha-free"&&(b.model="union-alpha"),!b.model&&(b.model=a)),b&&"object"==typeof b&&(b.stream=!0),_injectQ4(b)';
 
@@ -120,11 +125,17 @@ function patchTools(src) {
 function patchProvider(src) {
   if (!src.includes(TR_OLD) && !src.includes("_injectQ4(b)")) return null;
   let out = src;
-  // Coba patch routing dengan pattern utama terlebih dahulu
-  if (out.includes(ROUTING_OLD)) out = out.replace(ROUTING_OLD, ROUTING_NEW);
-  // Fallback: coba pattern w=new Set jika u=new Set tidak ditemukan
-  else if (out.includes(ROUTING_OLD_FALLBACK)) out = out.replace(ROUTING_OLD_FALLBACK, ROUTING_NEW);
-  else if (!out.includes(ROUTING_NEW)) return null;
+  // Coba patch routing dengan berbagai varian pattern
+  let routingPatched = false;
+  for (const pattern of ROUTING_OLD_VARIANTS) {
+    if (out.includes(pattern)) {
+      out = out.replace(pattern, ROUTING_NEW);
+      routingPatched = true;
+      break;
+    }
+  }
+  // Jika tidak ditemukan varian sama sekali, coba check apakah sudah ada ROUTING_NEW
+  if (!routingPatched && !out.includes(ROUTING_NEW)) return null;
   const tools = patchTools(out);
   if (tools === null || tools === out) return out === src ? null : out;
   out = tools;
