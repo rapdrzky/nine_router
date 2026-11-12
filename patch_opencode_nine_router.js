@@ -57,7 +57,7 @@ const PROXY_FIX_MARK = "proxyCapable";
 
 const PROXY_CLASS_RE = /class (\w+) extends [\w.$]+\.H\{constructor\(\)\{super\("opencode"/;
 
-const PROXY_EXEC_RE = /super\.execute\(\{\.\.\.(\w+),credentials:(\w+),directFetch:\((\w+),(\w+)\)=>(\w+)\(\1,\{method:\2\.method,headers:\2\.headers,body:\2\.body\},\{signal:\2\.signal\}\)\}\)/;
+const PROXY_EXEC_RE = /async execute\((\w+)\)\{let (\w+)=this\.prepareRequestCredentials\(\1\);return super\.execute\(\{\.\.\.\1,credentials:\2,directFetch:\((\w+),(\w+)\)=>(\w+)\(\1,\{method:\4\.method,headers:\4\.headers,body:\4\.body\},\{signal:\4\.signal\}\)\}\);/;
 
 function isChunkName(name) {
   return name.endsWith(".js");
@@ -239,17 +239,11 @@ function patchFreeLaneProxyExecutor(src) {
   const cls = PROXY_CLASS_RE.exec(src);
   if (!cls) return null;
   const clsIndex = cls.index;
-  const window = src.slice(clsIndex, clsIndex + 4000);
-  const m = PROXY_EXEC_RE.exec(window);
-  if (!m) return null;
-  const args = m[1];
-  const creds = m[2];
-  const optP = m[4];
-  const fn = m[5];
-  const proxyUrlParam = "c";
-  const call = `${fn}(${args},{method:${optP}.method,headers:${optP}.headers,body:${optP}.body},{signal:${optP}.signal,proxyUrl:${proxyUrlParam}})`;
-  const replacement = `super.execute({...${args},credentials:${creds},directFetch:Object.assign((${args},${optP},${proxyUrlParam})=>${call},{proxyCapable:!0})})`;
-  const next = window.replace(PROXY_EXEC_RE, () => replacement);
+  const window = src.slice(clsIndex, clsIndex + 12000);
+  const execOld = 'async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})';
+  const execNew = 'async execute(a){let b=this.prepareRequestCredentials(a);const c=(t,e,f)=>r(t,{method:e.method,headers:e.headers,body:e.body},{signal:e.signal,proxyUrl:f});c.proxyCapable=!0;return super.execute({...a,credentials:b,directFetch:c';
+  if (!window.includes(execOld)) return null;
+  const next = window.replace(execOld, execNew);
   if (next === window) return null;
   const out = src.slice(0, clsIndex) + next + src.slice(clsIndex + window.length);
   if (!out.includes(PROXY_FIX_MARK)) return null;
@@ -257,117 +251,51 @@ function patchFreeLaneProxyExecutor(src) {
 }
 
 function patchProxyFetchAdapter(src) {
-  if (src.includes("PROXY ROUTING VERIFIED")) return null;
-  const anchor = "const forceFreshSocket = proxyOptions?.forceFreshSocket === true || options?.forceFreshSocket === true;";
+  if (src.includes("b?.directFetch?.proxyCapable")) return null;
+  // Real anchor in the minified 9router build (app/.next-cli-build/server/chunks/7525.js,
+  // free-lane proxyAwareFetch): the MITM DNS-bypass branch starts here.
+  const anchor = "if(function(a){try{let b=new URL(a).hostname;return r.some(a=>b.includes(a))}catch{return!1}}(d)){";
   const at = src.indexOf(anchor);
   if (at < 0) return null;
-  const lineStart = src.lastIndexOf("\n", at) + 1;
   const block = [
-    "  // Protocol adapters that own their transport (wreq-js TLS impersonation)",
-    "  // cannot use an undici dispatcher: they must drive the proxy themselves.",
-    "  // Only adapters that declare `proxyCapable` opt in — any other adapter",
-    "  // ignores the proxy URL and would leave over the direct interface, so they",
-    "  // keep the undici path below.",
-    "  if (proxyUrl && options?.directFetch?.proxyCapable === true) {",
-    "    try {",
-    "      const res = await options.directFetch(url, { ...options, proxyUrl }, proxyUrl);",
-    '      const via = res?.headers?.get?.("x-9r-proxy-via");',
-    '      dbg("PROXY", `PROXY ROUTING VERIFIED | ${safeTargetHost(targetUrl)} | transport=adapter | proxy=${via || safeProxyHost(proxyUrl)} | status=${res?.status}`);',
-    "      return res;",
-    "    } catch (err) {",
-    "      if (proxyOptions?.strictProxy === true) {",
-    '        throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${err.message}`);',
-    "      }",
-    "      throw err;",
-    "    }",
-    "  }",
+    "if(h&&b?.directFetch?.proxyCapable===!0){try{return await b.directFetch(a,{...b,proxyUrl:h},h)}catch(e){if(c?.strictProxy===!0)throw Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${e.message}`);throw e}}",
     "",
-  ].join("\n") + "\n";
-  const next = src.slice(0, lineStart) + block + src.slice(lineStart);
+  ].join("\n");
+  const next = src.slice(0, at) + block + src.slice(at);
   if (next === src) return null;
-  if (!next.includes("PROXY ROUTING VERIFIED")) return null;
+  if (!next.includes("proxyCapable")) return null;
   return next;
 }
 
 function patchTlsSessionCache(src) {
   if (src.includes("sessionsByProxy")) return null;
-  const declOld = "let sessionPromise = null;";
+  const declOld = 'let o=null;class p extends Error{constructor(a){super(a),this.name="OpencodeTlsUnavailableError"}}';
   if (!src.includes(declOld)) return null;
-  let out = src.replace(declOld, "const sessionsByProxy = new Map();\nconst SESSIONS_MAX = 8;");
-  const startAnchor = "async function loadSession() {";
+  const clMatch = /cipherList:"([^"]+)"/.exec(src);
+  if (!clMatch) return null;
+  const tlsBlock =
+    'const sessionsByProxy=new Map;const SESSIONS_MAX=8;class p extends Error{constructor(a){super(a),this.name="OpencodeTlsUnavailableError"}};' +
+    'function normalizeProxyKey(a){let b=String(a??"").trim();if(!b)return"";try{let c=new URL(b);let d=c.port?": "+c.port:"";return c.protocol+"/"+c.hostname+d}catch{return b}}' +
+    'async function buildSession(a){let b=await (0,n.A)("wreq-js");if("function"!=typeof b.createSession)throw Error("wreq-js runtime is missing createSession");let c=await b.createSession({emulation:{tlsOptions:{cipherList:"' + clMatch[1] + '"}}});if(a){c.proxy=a}return Object.assign(c,{__proxyKey:normalizeProxyKey(a)})}' +
+    'async function loadSession(a=""){let b=normalizeProxyKey(a);if(!sessionsByProxy.has(b)){if(sessionsByProxy.size>=SESSIONS_MAX){let c=sessionsByProxy.keys().next().value;let d=sessionsByProxy.get(c);sessionsByProxy.delete(c);d.then((e)=>e.close?.()).catch(()=>{})}let e=buildSession(a).catch((f)=>{sessionsByProxy.delete(b);throw f});sessionsByProxy.set(b,e)}return sessionsByProxy.get(b)}';
+  let out = src.replace(declOld, tlsBlock);
+  const startAnchor = "async function q(){return o||";
   const start = out.indexOf(startAnchor);
-  const endAnchor = "export async function opencodeTlsFetch";
-  const end = out.indexOf(endAnchor);
+  const endAnchor = "async function r(a,b={}";
+  const end = out.indexOf(endAnchor, start);
   if (start < 0 || end < 0 || end < start) return null;
-  const block = [
-    "function normalizeProxyKey(proxyUrl) {",
-    '  const raw = typeof proxyUrl === "string" ? proxyUrl.trim() : "";',
-    '  if (!raw) return "";',
-    "  try {",
-    "    const parsed = new URL(raw);",
-    '    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;',
-    "  } catch {",
-    "    return raw;",
-    "  }",
-    "}",
-    "",
-    "async function buildSession(proxyUrl) {",
-    '  const wreq = await loadRuntimeDep("wreq-js");',
-    '  if (typeof wreq.createSession !== "function") {',
-    '    throw new Error("wreq-js runtime is missing createSession");',
-    "  }",
-    "  const session = await wreq.createSession({",
-    '    emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },',
-    "    ...(proxyUrl ? { proxy: proxyUrl } : {}),",
-    "  });",
-    "  return Object.assign(session, { __proxyKey: normalizeProxyKey(proxyUrl) });",
-    "}",
-    "",
-    "async function loadSession(proxyUrl = \"\") {",
-    "  const key = normalizeProxyKey(proxyUrl);",
-    "  if (!sessionsByProxy.has(key)) {",
-    "    if (sessionsByProxy.size >= SESSIONS_MAX) {",
-    "      const oldestKey = sessionsByProxy.keys().next().value;",
-    "      const oldest = sessionsByProxy.get(oldestKey);",
-    "      sessionsByProxy.delete(oldestKey);",
-    "      oldest?.then?.((session) => session.close?.()).catch(() => {});",
-    "    }",
-    "    const promise = buildSession(proxyUrl).catch((error) => {",
-    "      sessionsByProxy.delete(key);",
-    "      throw error;",
-    "    });",
-    "    sessionsByProxy.set(key, promise);",
-    "  }",
-    "  return sessionsByProxy.get(key);",
-    "}",
-    "",
-    "/** Drop the cached session(s) so the next call builds a fresh one. */",
-    "export function resetOpencodeTlsSession() {",
-    "  const pending = [...sessionsByProxy.values()];",
-    "  sessionsByProxy.clear();",
-    "  for (const promise of pending) promise?.then?.((session) => session.close?.()).catch(() => {});",
-    "}",
-    "",
-  ].join("\n") + "\n";
-  let next = out.slice(0, start) + block + out.slice(end);
-  const sigOld = "export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {";
-  const sigNew = "export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, proxyUrl = \"\" } = {}) {";
+  const qNew = 'async function q(a=""){return loadSession(a)}';
+  let next = out.slice(0, start) + qNew + out.slice(end);
+  const sigOld = 'async function r(a,b={},{signal:c,timeoutMs:d=12e4}={}){let e;try{e=await q()}catch(a){';
+  const sigNew = 'async function r(a,b={},{signal:c,timeoutMs:d=12e4,proxyUrl:pu=""}={}){let e;try{e=await q(pu)}catch(a){';
   if (!next.includes(sigOld)) return null;
   next = next.replace(sigOld, sigNew);
-  const loadOld = "    session = await loadSession();";
-  const loadNew = "    session = await loadSession(proxyUrl);";
-  if (!next.includes(loadOld)) return null;
-  next = next.replace(loadOld, loadNew);
-  const hdrOld = [
-    "  const headers = {};",
-    "  res.headers?.forEach?.((value, key) => {",
-    "    headers[key] = value;",
-    "  });",
-  ].join("\n");
-  const hdrNew = hdrOld + "\n  if (proxyUrl) headers[\"x-9r-proxy-via\"] = session.__proxyKey || \"wreq-js-proxy\";";
-  if (!next.includes(hdrOld)) return null;
-  next = next.replace(hdrOld, hdrNew);
-  if (next.includes("let sessionPromise")) return null;
+  const tailOld = 'let g=await e.fetch(a,f),h={};return g.headers?.forEach?.((a,b)=>{h[b]=a}),new Response(g.body,{status:g.status,statusText:g.statusText,headers:h})}';
+  const tailNew = 'let g=await e.fetch(a,f),h={};g.headers?.forEach?.((a,b)=>{h[b]=a});if(pu){h["x-9r-proxy-via"]=e.__proxyKey||"wreq-js-proxy"}return new Response(g.body,{status:g.status,statusText:g.statusText,headers:h})}';
+  if (!next.includes(tailOld)) return null;
+  next = next.replace(tailOld, tailNew);
+  if (next.includes("async function q(){return o||")) return null;
+  if (!next.includes("sessionsByProxy")) return null;
   return next;
 }
 
@@ -438,7 +366,6 @@ function run(options = {}) {
       out = freelanProxy.out;
       applied.freelanProxy += freelanProxy.applied;
     }
-    if (out.includes(PROXY_FIX_MARK)) state.freelanProxy = true;
     const proxy = proxyPatch.patchSource(out);
     if (proxy.changed) {
       out = proxy.out;
@@ -659,69 +586,32 @@ function testFreeLaneProxy() {
   // cache must be keyed by proxy URL.
 
   const execSample = [
-    'class M extends f.H{constructor(){super("opencode",g.xq.opencode)}async execute(a){let b=this.prepareRequestCredentials(a);let _oc9r=await super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})});try{_forgetQ4Session(b&&b._opencodeSession,_oc9r&&_oc9r.response&&_oc9r.response.status)}catch{}return _oc9r}}',
+    'class M extends f.H{constructor(){super("opencode",g.xq.opencode)}async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})});}}',
   ].join("\n");
   const execPatched = patchFreeLaneProxyExecutor(execSample);
   if (!execPatched) return "free-lane proxy patch (executor) did not match the anchors";
   if (!execPatched.includes("proxyCapable")) return "free-lane proxy patch (executor) did not mark the adapter proxy-capable";
-  if (!execPatched.includes("proxyUrl:c")) return "free-lane proxy patch (executor) did not forward the proxy URL";
+  if (!execPatched.includes("proxyUrl:f")) return "free-lane proxy patch (executor) did not forward the proxy URL";
   if (patchFreeLaneProxyExecutor(execPatched) !== null) return "free-lane proxy patch (executor) is not idempotent";
 
   const fetchSample = [
-    "async function proxyAwareFetch(url, options = {}, proxyOptions = null) {",
-    "  const targetUrl = typeof url === \"string\" ? url : url.toString();",
-    "  const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);",
-    "  const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));",
-    "  const proxyUrl = connectionProxyUrl || envProxyUrl;",
-    "  const forceFreshSocket = proxyOptions?.forceFreshSocket === true || options?.forceFreshSocket === true;",
-    "  // MITM DNS bypass: for known MITM-intercepted hosts, resolve real IP to avoid DNS spoof",
+    'async function G(a,b={},c=null){let h=null,i=c?.forceFreshSocket===!0||b?.forceFreshSocket===!0;if(function(a){try{let b=new URL(a).hostname;return r.some(a=>b.includes(a))}catch{return!1}}(d)){if(h)try{return await E(a,b,h,i)}catch(a){if(c?.strictProxy===!0)throw Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${a.message}`);throw a}}return E(a,b,null,i)}',
   ].join("\n");
   const fetchPatched = patchProxyFetchAdapter(fetchSample);
   if (!fetchPatched) return "free-lane proxy patch (proxyFetch adapter) did not match the anchors";
-  if (!/proxyUrl && options\?\.directFetch\?\.proxyCapable === true/.test(fetchPatched)) return "free-lane proxy patch (proxyFetch adapter) did not install the adapter branch";
+  if (!fetchPatched.includes("b?.directFetch?.proxyCapable")) return "free-lane proxy patch (proxyFetch adapter) did not install the adapter branch";
   if (patchProxyFetchAdapter(fetchPatched) !== null) return "free-lane proxy patch (proxyFetch adapter) is not idempotent";
 
   const tlsSample = [
-    "let sessionPromise = null;",
-    "",
-    "async function loadSession() {",
-    "  if (!sessionPromise) {",
-    "    sessionPromise = (async () => {",
-    "      const wreq = await loadRuntimeDep(\"wreq-js\");",
-    "      const session = await wreq.createSession({",
-    "        emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },",
-    "      });",
-    "      return session;",
-    "    })().catch((error) => {",
-    "      sessionPromise = null;",
-    "      throw error;",
-    "    });",
-    "  }",
-    "  return sessionPromise;",
-    "}",
-    "",
-    "export function resetOpencodeTlsSession() {",
-    "  const pending = sessionPromise;",
-    "  sessionPromise = null;",
-    "  pending?.then((session) => session.close?.()).catch(() => {});",
-    "}",
-    "",
-    "export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {",
-    "  let session;",
-    "  try {",
-    "    session = await loadSession();",
-    "  } catch (error) {",
-    "    throw new Error(\"tls down\");",
-    "  }",
-    "  const headers = {};",
-    "  res.headers?.forEach?.((value, key) => {",
-    "    headers[key] = value;",
-    "  });",
+    'let o=null;class p extends Error{constructor(a){super(a),this.name="OpencodeTlsUnavailableError"}}',
+    'async function q(){return o||(o=(async()=>{let a=await (0,n.A)("wreq-js");if("function"!=typeof a.createSession)throw Error("wreq-js runtime is missing createSession");return a.createSession({emulation:{tlsOptions:{cipherList:"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA"}}})})().catch(a=>{throw o=null,a})),o}',
+    'async function r(a,b={},{signal:c,timeoutMs:d=12e4}={}){let e;try{e=await q()}catch(a){throw new p(`wreq-js unavailable (${a instanceof Error?a.message:"unknown"}) — install the optional wreq-js dependency to reach the OpenCode free tier`)}let f={method:b.method||"GET",headers:b.headers,redirect:"follow",timeout:d};void 0!==b.body&&(f.body=b.body),c&&(f.signal=c);let g=await e.fetch(a,f),h={};return g.headers?.forEach?.((a,b)=>{h[b]=a}),new Response(g.body,{status:g.status,statusText:g.statusText,headers:h})}',
   ].join("\n");
   const tlsPatched = patchTlsSessionCache(tlsSample);
   if (!tlsPatched) return "free-lane proxy patch (tls session cache) did not match the anchors";
   if (!tlsPatched.includes("sessionsByProxy")) return "free-lane proxy patch (tls session cache) did not install the proxy-keyed cache";
-  if (tlsPatched.includes("let sessionPromise")) return "free-lane proxy patch (tls session cache) left the old session cache in place";
+  if (tlsPatched.includes("let o=null")) return "free-lane proxy patch (tls session cache) left the old session cache in place";
+  if (tlsPatched.includes("let sessionPromise")) return "free-lane proxy patch (tls session cache) left the old session promise in place";
 
   return null;
 }
