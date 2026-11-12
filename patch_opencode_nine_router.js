@@ -32,6 +32,14 @@ const CAP_FREE = '"union-alpha-free":{vision:!0,reasoning:!0,thinkingFormat:"ant
 
 const RELAY_MARK = "relayClientIp";
 
+const SESSION_MARK = "function _forgetQ4Session(";
+
+const SESSION_STORE_RE = /let (\w+)=new Map,\w+=setInterval\(\(\)=>\{let \w+=Date\.now\(\);for\(let\[\w+,\w+\]of \1\)/g;
+
+const SESSION_EXEC_RE = /async execute\((\w+)\)\{let (\w+)=this\.prepareRequestCredentials\(\1\);return /;
+
+const SESSION_CLASS_RE = /class (\w+) extends [\w.$]+\.H\{constructor\(\)\{super\("opencode"/;
+
 const RELAY_RULES = [
   {
     anchor: 'newRequestInit.headers.delete("host");',
@@ -222,9 +230,79 @@ function patchRelay(src) {
   return out === src ? null : out;
 }
 
+function patchSession(src) {
+  if (src.includes(SESSION_MARK)) return null;
+
+  const cls = SESSION_CLASS_RE.exec(src);
+  if (!cls) return null;
+
+  const marker = src.lastIndexOf("_opencodeSession", cls.index);
+  if (marker < 0) return null;
+
+  const window = src.slice(marker, marker + 4000);
+  const stores = [];
+  SESSION_STORE_RE.lastIndex = 0;
+  let store;
+  while ((store = SESSION_STORE_RE.exec(window)) && stores.length < 2) stores.push(store[1]);
+  if (stores.length < 2) return null;
+
+  const exec = SESSION_EXEC_RE.exec(src.slice(cls.index));
+  if (!exec) return null;
+
+  const prefix = exec[0];
+  const arg = exec[1];
+  const credentials = exec[2];
+  const execIndex = cls.index + exec.index;
+  const callStart = execIndex + prefix.length;
+  const callEnd = scanCallEnd(src, callStart);
+  if (callEnd < 0 || src[callEnd] !== "}") return null;
+  const call = src.slice(callStart, callEnd);
+
+  const result = uniqueName(src, "_oc9r");
+  const patched =
+    `${prefix.replace(/return $/, "")}` +
+    `let ${result}=await ${call};` +
+    `try{_forgetQ4Session(${credentials}&&${credentials}._opencodeSession,${result}&&${result}.response&&${result}.response.status)}catch{}` +
+    `return ${result}}`;
+
+  let out = src.slice(0, execIndex) + patched + src.slice(callEnd + 1);
+
+  const helper =
+    `function _forgetQ4Session(a,b){if(!a||(429!==b&&403!==b))return!1;let c=!1;` +
+    `for(let d of [${stores.join(",")}]){for(let e of d){let f=e[1];` +
+    `if(f&&f.sessionId===a){d.delete(e[0]);c=!0}}}return c}`;
+  out = out.slice(0, cls.index) + helper + out.slice(cls.index);
+
+  return out === src ? null : out;
+}
+
+function scanCallEnd(src, from) {
+  let depth = 0;
+  let quote = "";
+  for (let i = from; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "(") depth++;
+    else if (ch === ")" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+function uniqueName(src, base) {
+  let name = base;
+  let n = 0;
+  while (src.includes(name)) name = base + (++n);
+  return name;
+}
+
 function run(options = {}) {
-  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, changed: 0 };
-  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false };
+  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, session: 0, changed: 0 };
+  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false, session: false };
   const files = [];
   const pending = [];
 
@@ -245,6 +323,8 @@ function run(options = {}) {
     if (version) { out = version; applied.version++; }
     const relay = patchRelay(out);
     if (relay) { out = relay; applied.relay++; }
+    const session = patchSession(out);
+    if (session) { out = session; applied.session++; }
 
     if (out !== src) pending.push([file, out]);
 
@@ -254,6 +334,7 @@ function run(options = {}) {
     if (out.includes(VERSION_DONE)) state.version = true;
     if (out.includes(RELAY_MARK)) state.relay = true;
     if (src.includes('"x-relay-target"')) state.relayTemplates = true;
+    if (out.includes(SESSION_MARK)) state.session = true;
   }
 
   const missing = [];
@@ -463,8 +544,67 @@ function testRelayPatch() {
   return null;
 }
 
+function testSessionPatch() {
+  const foreign = [
+    'class Go extends f.H{constructor(){super("opencode-go")}',
+    'async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b})}',
+    'prepareRequestCredentials(){return{}}}'
+  ].join("\n");
+  const sample = [
+    'let u="x-opencode-session",v="_opencodeSession",w=/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;',
+    "let E=new Map,F=setInterval(()=>{let a=Date.now();for(let[b,c]of E)a-c.lastUsed>h.v1.sessionTtlMs&&E.delete(b)},h.v1.sessionCleanupIntervalMs);",
+    "let I=new Map,J=setInterval(()=>{let a=Date.now();for(let[b,c]of I)a-c.lastUsed>h.v1.sessionTtlMs&&I.delete(b)},h.v1.sessionCleanupIntervalMs);",
+    'class M extends f.H{constructor(){super("opencode",g.xq.opencode)}async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})})}buildUrl(a){return 1}}'
+  ].join("\n");
+  const withForeign = foreign + "\n" + sample;
+
+  const out = patchSession(withForeign);
+  if (!out) return "session patch did not match the executor anchor";
+  if (!out.includes(SESSION_MARK)) return "session patch did not install the forget helper";
+  if (!out.includes("for(let d of [E,I])")) return "session patch did not bind the two session stores";
+  if (!out.includes("_opencodeSession")) return "session patch dropped the session field lookup";
+  if (!out.includes("429!==b&&403!==b")) return "session patch dropped the status gate";
+  if (out.includes("return super.execute({...a,credentials:b,directFetch")) return "session patch still returns the raw opencode executor call";
+  if (out.split("let _oc9r=").length !== 2) return "session patch touched more than one executor";
+  if (out.indexOf("let _oc9r=") < out.indexOf("class M extends")) return "session patch modified the foreign executor";
+  if (patchSession(out) !== null) return "session patch is not idempotent";
+  try {
+    new Function(out);
+  } catch (err) {
+    return "session patch produced invalid JavaScript: " + err.message;
+  }
+
+  try {
+    const helper = out.slice(out.indexOf(SESSION_MARK), out.indexOf("class M extends"));
+    const probe = [
+      'let E=new Map([["k1",{sessionId:"ses_a"}],["k2",{sessionId:"ses_b"}]]);',
+      'let I=new Map([["x",{sessionId:"ses_a"}]]);',
+      helper,
+      'let r1=_forgetQ4Session("ses_a",429);',
+      'let r2=[E.size,I.size];',
+      'let r3=_forgetQ4Session("ses_a",200);',
+      'let r4=E.size;',
+      'let r5=_forgetQ4Session("",429);',
+      "return [r1,r2[0],r2[1],r3,r4,r5]"
+    ].join("\n");
+    const got = new Function(probe)();
+    const want = [true, 1, 0, false, 1, false];
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      return `session patch forget helper returned ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`;
+    }
+  } catch (err) {
+    return "session patch forget helper threw: " + err.message;
+  }
+
+  const unrelated = 'class M extends f.H{constructor(){super("bedrock")}async execute(a){return 1}}';
+  if (patchSession(unrelated) !== null) return "session patch modified an unrelated provider";
+  const noStores = 'class M extends f.H{constructor(){super("opencode")}async execute(a){let b=this.prepareRequestCredentials(a);return super.execute({...a,credentials:b})}}';
+  if (patchSession(noStores) !== null) return "session patch matched without the session stores";
+  return null;
+}
+
 function selfTest() {
-  return testInjector() || testProviderPatch() || testVersionPatch() || testRelayPatch();
+  return testInjector() || testProviderPatch() || testVersionPatch() || testRelayPatch() || testSessionPatch();
 }
 
 function start() {
@@ -484,8 +624,11 @@ function start() {
   const ver = result.version ? ` 9router=${result.version}` : "";
   const written = result.files.length ? " files=" + result.files.join(",") : "";
   console.log(
-    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} (${result.applied.changed} chunk(s) written)${ver}${written}`
+    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} session=${result.applied.session} (${result.applied.changed} chunk(s) written)${ver}${written}`
   );
+  if (!result.state.session) {
+    console.warn("WARN: opencode session cache anchor not found; a 429 still needs a manual restart");
+  }
 
   spawnServer();
 }
@@ -523,7 +666,7 @@ function runChild(cmd) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, testRelayPatch, patchProvider, patchVersion, patchRelay };
+module.exports = { run, selfTest, findBuild, collectFiles, testInjector, testProviderPatch, testVersionPatch, testRelayPatch, testSessionPatch, patchProvider, patchVersion, patchRelay, patchSession };
 
 if (require.main === module) {
   if (process.argv[2] === "--start") start();

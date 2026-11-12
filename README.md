@@ -17,6 +17,7 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 - Startup patch injects the `bash`, `glob`, `grep` and `read` tool definitions into every opencode request.
 - Startup patch neutralizes the `/api/version` update check, so the dashboard never shows an `↑ New version available` banner. The image is pinned here, not by the 9Router CLI updater, so an upstream npm release cannot be installed in place.
 - Startup patch makes the Proxy Pool relay templates forward the client IP. Cloudflare strips `cf-connecting-ip` from a Worker's outbound `fetch()`, so free-tier requests sent through a relay reached upstream without any client IP and failed with `429 rate_limit_error: Client IP address is required for free usage`. The patched templates map the platform header (`cf-connecting-ip`, `x-vercel-forwarded-for`, `x-nf-client-connection-ip`) onto `x-forwarded-for` and `x-real-ip`.
+- Startup patch drops a rejected OpenCode session so a 429 does not stick until restart. The free tier limits a session id, and the pinned build caches one id per client identity forever; upstream fixed this in `forgetOpencodeSession()` (v0.5.119), which has no published image yet, so this patch backports the behaviour: a 429 or 403 from the free lane evicts that id and the next request mints a fresh one.
 - Dashboard for provider setup, quota tracking and API keys.
 - OpenAI-compatible API at `/v1` for any CLI tool or client.
 - Healthcheck on `/api/health`, the only unauthenticated route. `/v1/models` needs an API key, so a probe there returns `401` and Railway restarts the service in a loop.
@@ -64,6 +65,7 @@ CMD ["node", "/app/patch_opencode_nine_router.js", "--start"]
 - Installs the `_injectQ4` helper, which fills `body.tools` with the `bash`, `glob`, `grep` and `read` definitions when absent and never overwrites a tool the client already sent.
 - Rewrites the `/api/version` route handler so it reports `currentVersion === latestVersion` and `hasUpdate: false` without contacting the npm registry. Upstream fetches `registry.npmjs.org/9router/latest` and compares it to the version baked into the build, so a pinned image would otherwise advertise an update it can never install.
 - Rewrites the four Proxy Pool relay templates (`cloudflare-deploy`, `deno-deploy`, `vercel-deploy`, `netlify-deploy`) so each relay copies the platform's client-IP header into the outbound `x-forwarded-for` and `x-real-ip`. Without it the free tier answers `429 Client IP address is required for free usage` whenever a request leaves through a relay. The injected code contains no backticks or `${`, so it cannot break the surrounding template literal.
+- Wraps the `opencode` executor's `execute()` so a `429` or `403` response evicts the session id it used from both session caches, then returns the response untouched. The executor is located as the class whose constructor calls `super("opencode"` so the sibling `opencode-go` executor is never touched, and the two cache maps are captured by their `new Map` plus cleanup-`setInterval` shape rather than by minified name. Client-supplied session ids never enter those caches, so they are never evicted.
 - Writes are two-phase: every file is patched and validated in memory first, and only written (temp file plus rename, so a crash cannot leave a half-written chunk) once all anchors are confirmed present.
 - Re-running is safe. Writes converge: a stale injected block is rewritten in place rather than duplicated.
 
@@ -72,16 +74,16 @@ The patch fails fast. If an anchor is missing, or the self-test throws, the cont
 A healthy start logs:
 
 ```
-opencode patch: provider=… catalog=… capabilities=… version=… relay=… (N chunk(s) written) 9router=<version> files=<paths>
+opencode patch: provider=… catalog=… capabilities=… version=… relay=… session=… (N chunk(s) written) 9router=<version> files=<paths>
 ```
 
-The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, the provider patch against both new and legacy minified shapes (with and without a `var` prelude, and with renamed parameters), the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses), and the relay patch for all four worker templates (injection present, no backticks or `${` added, idempotent, non-relay files untouched).
+The self-test covers the tool helper against empty bodies, OpenAI-style tools, Anthropic-style tools and junk entries, the provider patch against both new and legacy minified shapes (with and without a `var` prelude, and with renamed parameters), the version-route rewrite (anchor match, update flag cleared, npm lookup call removed, idempotent, handler still parses), the relay patch for all four worker templates (injection present, no backticks or `${` added, idempotent, non-relay files untouched), and the session patch (correct executor selected, foreign `opencode-go` executor untouched, eviction behaviour across both caches, status gate, idempotent, patched chunk still parses).
 
 ### Relay workers must be redeployed
 
 The relay patch changes the worker source that the dashboard generates. A worker that is already deployed keeps running its old code, so after this image boots, open **Dashboard → Proxy Pools** and redeploy (or delete and recreate) the pool once. Newly created pools pick up the fix automatically.
 
-If the free tier still answers `429 rate_limit_error` after the relay redeploy, the relay pools are degraded and no source-level fix exists in `v0.5.116`: free-tier quota is keyed to the upstream session and, with `strictProxy` set, `v0.5.116` never passes the selected proxy into the `wreq-js` TLS transport (fixed upstream in `a76c2afc`, not published as an image yet). Restart the service to mint a fresh session, or configure a residential SOCKS5/HTTP proxy and accept that the free lane bypasses it until that upstream fix ships.
+If the free tier still answers `429 rate_limit_error` after the relay redeploy, the relay pools are degraded and no source-level fix exists in `v0.5.116`: free-tier quota is keyed to the upstream session, and with `strictProxy` set, `v0.5.116` never passes the selected proxy into the `wreq-js` TLS transport (fixed upstream in `a76c2afc`, not published as an image yet). The session patch above makes a 429 self-heal instead of requiring a restart: the rejected session id is evicted and the next request mints a new one. A restart is only needed when the start log reports `session=0`, which means the session anchor no longer matched this build. A residential SOCKS5/HTTP proxy is still bypassed on the free lane until that upstream fix ships.
 
 Standalone usage:
 
