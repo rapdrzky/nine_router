@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Railway](https://img.shields.io/badge/deploy-Railway-purple)
 ![Docker](https://img.shields.io/badge/runtime-Docker-blue)
-![Version](https://img.shields.io/badge/9router-v0.5.109-green)
+![Version](https://img.shields.io/badge/9router-v0.5.116-green)
 
 Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Railway](https://railway.app) on top of its own Docker image. There is no source build here — the image is pinned by tag and digest, and one Node script patches the installed build at container startup before the server boots.
 
@@ -11,7 +11,7 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 
 ## Features
 
-- Image pinned to `v0.5.91` plus an immutable manifest digest, so builds are reproducible and an upstream tag rewrite cannot change production behavior.
+- Image pinned to `v0.5.116` plus an immutable manifest digest, so builds are reproducible and an upstream tag rewrite cannot change production behavior.
 - Startup patch forces `stream: true` on opencode requests. The free tier rejects non-streaming requests (`FreeTierError`), so this is required.
 - Startup patch registers `union-alpha-free` as an alias of `union-alpha`: added to the messages-format routing set, the provider catalog, and the capability map (vision, reasoning, 262k context, 131k output). The alias is translated back to `union-alpha` inside `transformRequest`.
 - Startup patch injects the `bash`, `glob`, `grep` and `read` tool definitions into every opencode request.
@@ -46,7 +46,7 @@ Thin wrapper that deploys [9Router](https://github.com/decolua/9router) to [Rail
 ## Dockerfile
 
 ```dockerfile
-FROM decolua/9router:0.5.91@sha256:efc6e88c963ddb035f8da26a74e156b927863cd05625b47f3587972bc865bd25
+FROM decolua/9router:0.5.116@sha256:12086f97857f784ab7762e95595f70d71279a7a60c800af0f100183e8da7ea36
 
 COPY patch_opencode_nine_router.js /app/
 

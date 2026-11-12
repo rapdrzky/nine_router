@@ -145,7 +145,10 @@ function patchCapabilities(src) {
 function patchVersion(src) {
   if (src.includes(VERSION_DONE)) return null;
   if (!src.includes(VERSION_OLD)) return null;
-  return src.replace(VERSION_OLD, VERSION_NEW);
+  const out = src.replace(VERSION_OLD, VERSION_NEW);
+  // Catat bahwa patch versi sudah diterapkan (mencegah banner "New version available")
+  // Catatan: Patch ini tidak memengaruhi rate limit 429 dari OpenCode free tier
+  return out;
 }
 
 function run(options = {}) {

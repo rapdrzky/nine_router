@@ -1,4 +1,4 @@
-FROM decolua/9router:0.5.109@sha256:28474ba417ac76198abce43b6758b187201e0acac364f72ff3918b0f7e11b040
+FROM decolua/9router:0.5.116@sha256:12086f97857f784ab7762e95595f70d71279a7a60c800af0f100183e8da7ea36
 
 COPY patch_opencode_nine_router.js /app/
 
