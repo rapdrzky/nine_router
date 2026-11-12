@@ -18,6 +18,8 @@ const TOOLS_INSERT = `let _Q4=${JSON.stringify(Q4_TOOLS)};` + HELPER_SRC;
 
 const ROUTING_OLD = 'u=new Set(["union-alpha"])';
 const ROUTING_NEW = 'u=new Set(["union-alpha","union-alpha-free"])';
+// Tambahan: coba pattern w=new Set jika u=new Set tidak ditemukan (versi minified berbeda)
+const ROUTING_OLD_FALLBACK = 'w=new Set(["union-alpha"])';
 const TR_OLD = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&!b.model&&(b.model=a),b&&"object"==typeof b&&(b.stream=!0)';
 const TR_NEW = 'transformRequest(a,b,c,d){if(b&&"object"==typeof b&&a&&(b.model==="union-alpha-free"&&(b.model="union-alpha"),!b.model&&(b.model=a)),b&&"object"==typeof b&&(b.stream=!0),_injectQ4(b)';
 
@@ -118,7 +120,10 @@ function patchTools(src) {
 function patchProvider(src) {
   if (!src.includes(TR_OLD) && !src.includes("_injectQ4(b)")) return null;
   let out = src;
+  // Coba patch routing dengan pattern utama terlebih dahulu
   if (out.includes(ROUTING_OLD)) out = out.replace(ROUTING_OLD, ROUTING_NEW);
+  // Fallback: coba pattern w=new Set jika u=new Set tidak ditemukan
+  else if (out.includes(ROUTING_OLD_FALLBACK)) out = out.replace(ROUTING_OLD_FALLBACK, ROUTING_NEW);
   else if (!out.includes(ROUTING_NEW)) return null;
   const tools = patchTools(out);
   if (tools === null || tools === out) return out === src ? null : out;
