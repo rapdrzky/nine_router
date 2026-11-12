@@ -44,6 +44,21 @@ const VERSION_OLD = `async function i(){let a=await h(),b=f.rE,c=!!a&&function(a
 const VERSION_NEW = `async function i(){let a=f.rE;return Response.json({currentVersion:a,latestVersion:a,hasUpdate:!1})}`;
 const VERSION_DONE = "hasUpdate:!1";
 
+// Free-lane proxy transport backport (9router upstream commit a76c2afc93e34070cf11685968c47a06fcd1fcb0).
+// Upstream fix commit: "fix(opencode): carry the selected proxy through the wreq-js transport".
+// Bug: Proxy Pool selection never reached the wreq-js runtime — opencodeTlsFetch() created its
+// session without a proxy, so free-tier requests left through the server's direct interface even
+// with a pool selected and strictProxy set, and proxyAwareFetch() swapped the adapter for an
+// undici ProxyAgent, dropping the TLS impersonation the free gate requires. That is why the
+// rotation over 455 proxies never helped and the lane kept answering 429.
+// Backport for the pinned 9Router v0.5.116 image, which predates the fix.
+
+const PROXY_FIX_MARK = "proxyCapable";
+
+const PROXY_CLASS_RE = /class (\w+) extends [\w.$]+\.H\{constructor\(\)\{super\("opencode"/;
+
+const PROXY_EXEC_RE = /super\.execute\(\{\.\.\.(\w+),credentials:(\w+),directFetch:\((\w+),(\w+)\)=>(\w+)\(\1,\{method:\2\.method,headers:\2\.headers,body:\2\.body\},\{signal:\2\.signal\}\)\}\)/;
+
 function isChunkName(name) {
   return name.endsWith(".js");
 }
@@ -217,6 +232,160 @@ function patchSession(src) {
   return out === src ? null : out;
 }
 
+// ─── Free-lane proxy transport backport (9router a76c2afc) ─────────────────
+
+function patchFreeLaneProxyExecutor(src) {
+  if (src.includes(PROXY_FIX_MARK)) return null;
+  const cls = PROXY_CLASS_RE.exec(src);
+  if (!cls) return null;
+  const clsIndex = cls.index;
+  const window = src.slice(clsIndex, clsIndex + 4000);
+  const m = PROXY_EXEC_RE.exec(window);
+  if (!m) return null;
+  const args = m[1];
+  const creds = m[2];
+  const optP = m[4];
+  const fn = m[5];
+  const proxyUrlParam = "c";
+  const call = `${fn}(${args},{method:${optP}.method,headers:${optP}.headers,body:${optP}.body},{signal:${optP}.signal,proxyUrl:${proxyUrlParam}})`;
+  const replacement = `super.execute({...${args},credentials:${creds},directFetch:Object.assign((${args},${optP},${proxyUrlParam})=>${call},{proxyCapable:!0})})`;
+  const next = window.replace(PROXY_EXEC_RE, () => replacement);
+  if (next === window) return null;
+  const out = src.slice(0, clsIndex) + next + src.slice(clsIndex + window.length);
+  if (!out.includes(PROXY_FIX_MARK)) return null;
+  return out;
+}
+
+function patchProxyFetchAdapter(src) {
+  if (src.includes("PROXY ROUTING VERIFIED")) return null;
+  const anchor = "const forceFreshSocket = proxyOptions?.forceFreshSocket === true || options?.forceFreshSocket === true;";
+  const at = src.indexOf(anchor);
+  if (at < 0) return null;
+  const lineStart = src.lastIndexOf("\n", at) + 1;
+  const block = [
+    "  // Protocol adapters that own their transport (wreq-js TLS impersonation)",
+    "  // cannot use an undici dispatcher: they must drive the proxy themselves.",
+    "  // Only adapters that declare `proxyCapable` opt in — any other adapter",
+    "  // ignores the proxy URL and would leave over the direct interface, so they",
+    "  // keep the undici path below.",
+    "  if (proxyUrl && options?.directFetch?.proxyCapable === true) {",
+    "    try {",
+    "      const res = await options.directFetch(url, { ...options, proxyUrl }, proxyUrl);",
+    '      const via = res?.headers?.get?.("x-9r-proxy-via");',
+    '      dbg("PROXY", `PROXY ROUTING VERIFIED | ${safeTargetHost(targetUrl)} | transport=adapter | proxy=${via || safeProxyHost(proxyUrl)} | status=${res?.status}`);',
+    "      return res;",
+    "    } catch (err) {",
+    "      if (proxyOptions?.strictProxy === true) {",
+    '        throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${err.message}`);',
+    "      }",
+    "      throw err;",
+    "    }",
+    "  }",
+    "",
+  ].join("\n") + "\n";
+  const next = src.slice(0, lineStart) + block + src.slice(lineStart);
+  if (next === src) return null;
+  if (!next.includes("PROXY ROUTING VERIFIED")) return null;
+  return next;
+}
+
+function patchTlsSessionCache(src) {
+  if (src.includes("sessionsByProxy")) return null;
+  const declOld = "let sessionPromise = null;";
+  if (!src.includes(declOld)) return null;
+  let out = src.replace(declOld, "const sessionsByProxy = new Map();\nconst SESSIONS_MAX = 8;");
+  const startAnchor = "async function loadSession() {";
+  const start = out.indexOf(startAnchor);
+  const endAnchor = "export async function opencodeTlsFetch";
+  const end = out.indexOf(endAnchor);
+  if (start < 0 || end < 0 || end < start) return null;
+  const block = [
+    "function normalizeProxyKey(proxyUrl) {",
+    '  const raw = typeof proxyUrl === "string" ? proxyUrl.trim() : "";',
+    '  if (!raw) return "";',
+    "  try {",
+    "    const parsed = new URL(raw);",
+    '    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;',
+    "  } catch {",
+    "    return raw;",
+    "  }",
+    "}",
+    "",
+    "async function buildSession(proxyUrl) {",
+    '  const wreq = await loadRuntimeDep("wreq-js");',
+    '  if (typeof wreq.createSession !== "function") {',
+    '    throw new Error("wreq-js runtime is missing createSession");',
+    "  }",
+    "  const session = await wreq.createSession({",
+    '    emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },',
+    "    ...(proxyUrl ? { proxy: proxyUrl } : {}),",
+    "  });",
+    "  return Object.assign(session, { __proxyKey: normalizeProxyKey(proxyUrl) });",
+    "}",
+    "",
+    "async function loadSession(proxyUrl = \"\") {",
+    "  const key = normalizeProxyKey(proxyUrl);",
+    "  if (!sessionsByProxy.has(key)) {",
+    "    if (sessionsByProxy.size >= SESSIONS_MAX) {",
+    "      const oldestKey = sessionsByProxy.keys().next().value;",
+    "      const oldest = sessionsByProxy.get(oldestKey);",
+    "      sessionsByProxy.delete(oldestKey);",
+    "      oldest?.then?.((session) => session.close?.()).catch(() => {});",
+    "    }",
+    "    const promise = buildSession(proxyUrl).catch((error) => {",
+    "      sessionsByProxy.delete(key);",
+    "      throw error;",
+    "    });",
+    "    sessionsByProxy.set(key, promise);",
+    "  }",
+    "  return sessionsByProxy.get(key);",
+    "}",
+    "",
+    "/** Drop the cached session(s) so the next call builds a fresh one. */",
+    "export function resetOpencodeTlsSession() {",
+    "  const pending = [...sessionsByProxy.values()];",
+    "  sessionsByProxy.clear();",
+    "  for (const promise of pending) promise?.then?.((session) => session.close?.()).catch(() => {});",
+    "}",
+    "",
+  ].join("\n") + "\n";
+  let next = out.slice(0, start) + block + out.slice(end);
+  const sigOld = "export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {";
+  const sigNew = "export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, proxyUrl = \"\" } = {}) {";
+  if (!next.includes(sigOld)) return null;
+  next = next.replace(sigOld, sigNew);
+  const loadOld = "    session = await loadSession();";
+  const loadNew = "    session = await loadSession(proxyUrl);";
+  if (!next.includes(loadOld)) return null;
+  next = next.replace(loadOld, loadNew);
+  const hdrOld = [
+    "  const headers = {};",
+    "  res.headers?.forEach?.((value, key) => {",
+    "    headers[key] = value;",
+    "  });",
+  ].join("\n");
+  const hdrNew = hdrOld + "\n  if (proxyUrl) headers[\"x-9r-proxy-via\"] = session.__proxyKey || \"wreq-js-proxy\";";
+  if (!next.includes(hdrOld)) return null;
+  next = next.replace(hdrOld, hdrNew);
+  if (next.includes("let sessionPromise")) return null;
+  return next;
+}
+
+function patchFreeLaneProxy(src) {
+  if (src.includes(PROXY_FIX_MARK)) return { out: src, applied: 0 };
+  let out = src;
+  let applied = 0;
+  const steps = [patchFreeLaneProxyExecutor, patchProxyFetchAdapter, patchTlsSessionCache];
+  for (const step of steps) {
+    const res = step(out);
+    if (res) {
+      out = res;
+      applied++;
+    }
+  }
+  return { out, applied };
+}
+
 function scanCallEnd(src, from) {
   let depth = 0;
   let quote = "";
@@ -242,8 +411,8 @@ function uniqueName(src, base) {
 }
 
 function run(options = {}) {
-  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, session: 0, proxyTest: 0, changed: 0 };
-  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false, session: false, proxyTest: false, proxyTestTarget: false };
+  const applied = { provider: 0, catalog: 0, capabilities: 0, version: 0, relay: 0, session: 0, freelanProxy: 0, proxyTest: 0, changed: 0 };
+  const state = { provider: false, catalog: false, capabilities: false, version: false, relay: false, relayTemplates: false, session: false, freelanProxy: false, proxyTest: false, proxyTestTarget: false };
   const files = [];
   const pending = [];
 
@@ -264,6 +433,12 @@ function run(options = {}) {
     if (version) { out = version; applied.version++; }
     const session = patchSession(out);
     if (session) { out = session; applied.session++; }
+    const freelanProxy = patchFreeLaneProxy(out);
+    if (freelanProxy.applied) {
+      out = freelanProxy.out;
+      applied.freelanProxy += freelanProxy.applied;
+    }
+    if (out.includes(PROXY_FIX_MARK)) state.freelanProxy = true;
     const proxy = proxyPatch.patchSource(out);
     if (proxy.changed) {
       out = proxy.out;
@@ -280,6 +455,7 @@ function run(options = {}) {
     if (proxyPatch.sourceMarks(out).relay) state.relay = true;
     if (src.includes(proxyPatch.RELAY_TEMPLATE_ANCHOR)) state.relayTemplates = true;
     if (out.includes(SESSION_MARK)) state.session = true;
+    if (out.includes(PROXY_FIX_MARK)) state.freelanProxy = true;
     if (proxyPatch.sourceMarks(out).proxyTest) state.proxyTest = true;
     if (src.includes(proxyPatch.PROXY_TEST_ANCHOR)) state.proxyTestTarget = true;
   }
@@ -290,6 +466,7 @@ function run(options = {}) {
   if (!state.capabilities) missing.push("model capability map (union-alpha entry)");
   if (!state.version) missing.push("version route (npm update-check response)");
   if (state.relayTemplates && !state.relay) missing.push("proxy pool relay templates (client IP forwarding)");
+  if (!state.freelanProxy) missing.push("free-lane proxy transport anchors not found (opencode executor / proxy fetch / TLS session cache)");
   if (missing.length) return { ok: false, reason: "anchors not found: " + missing.join("; "), applied, files };
 
   for (const [file, out] of pending) {
@@ -474,12 +651,88 @@ function testSessionPatch() {
   return null;
 }
 
+function testFreeLaneProxy() {
+  // Backport of upstream 9router a76c2afc: "fix(opencode): carry the selected
+  // proxy through the wreq-js transport". Executor must forward the resolved
+  // proxy URL through the adapter and mark it proxy-capable; proxyAwareFetch
+  // must route through the adapter when the adapter opts in; the TLS session
+  // cache must be keyed by proxy URL.
+
+  const execSample = [
+    'class M extends f.H{constructor(){super("opencode",g.xq.opencode)}async execute(a){let b=this.prepareRequestCredentials(a);let _oc9r=await super.execute({...a,credentials:b,directFetch:(a,b)=>r(a,{method:b.method,headers:b.headers,body:b.body},{signal:b.signal})});try{_forgetQ4Session(b&&b._opencodeSession,_oc9r&&_oc9r.response&&_oc9r.response.status)}catch{}return _oc9r}}',
+  ].join("\n");
+  const execPatched = patchFreeLaneProxyExecutor(execSample);
+  if (!execPatched) return "free-lane proxy patch (executor) did not match the anchors";
+  if (!execPatched.includes("proxyCapable")) return "free-lane proxy patch (executor) did not mark the adapter proxy-capable";
+  if (!execPatched.includes("proxyUrl:c")) return "free-lane proxy patch (executor) did not forward the proxy URL";
+  if (patchFreeLaneProxyExecutor(execPatched) !== null) return "free-lane proxy patch (executor) is not idempotent";
+
+  const fetchSample = [
+    "async function proxyAwareFetch(url, options = {}, proxyOptions = null) {",
+    "  const targetUrl = typeof url === \"string\" ? url : url.toString();",
+    "  const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);",
+    "  const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));",
+    "  const proxyUrl = connectionProxyUrl || envProxyUrl;",
+    "  const forceFreshSocket = proxyOptions?.forceFreshSocket === true || options?.forceFreshSocket === true;",
+    "  // MITM DNS bypass: for known MITM-intercepted hosts, resolve real IP to avoid DNS spoof",
+  ].join("\n");
+  const fetchPatched = patchProxyFetchAdapter(fetchSample);
+  if (!fetchPatched) return "free-lane proxy patch (proxyFetch adapter) did not match the anchors";
+  if (!/proxyUrl && options\?\.directFetch\?\.proxyCapable === true/.test(fetchPatched)) return "free-lane proxy patch (proxyFetch adapter) did not install the adapter branch";
+  if (patchProxyFetchAdapter(fetchPatched) !== null) return "free-lane proxy patch (proxyFetch adapter) is not idempotent";
+
+  const tlsSample = [
+    "let sessionPromise = null;",
+    "",
+    "async function loadSession() {",
+    "  if (!sessionPromise) {",
+    "    sessionPromise = (async () => {",
+    "      const wreq = await loadRuntimeDep(\"wreq-js\");",
+    "      const session = await wreq.createSession({",
+    "        emulation: { tlsOptions: { cipherList: OPENCODE_CIPHER_LIST } },",
+    "      });",
+    "      return session;",
+    "    })().catch((error) => {",
+    "      sessionPromise = null;",
+    "      throw error;",
+    "    });",
+    "  }",
+    "  return sessionPromise;",
+    "}",
+    "",
+    "export function resetOpencodeTlsSession() {",
+    "  const pending = sessionPromise;",
+    "  sessionPromise = null;",
+    "  pending?.then((session) => session.close?.()).catch(() => {});",
+    "}",
+    "",
+    "export async function opencodeTlsFetch(url, init = {}, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {",
+    "  let session;",
+    "  try {",
+    "    session = await loadSession();",
+    "  } catch (error) {",
+    "    throw new Error(\"tls down\");",
+    "  }",
+    "  const headers = {};",
+    "  res.headers?.forEach?.((value, key) => {",
+    "    headers[key] = value;",
+    "  });",
+  ].join("\n");
+  const tlsPatched = patchTlsSessionCache(tlsSample);
+  if (!tlsPatched) return "free-lane proxy patch (tls session cache) did not match the anchors";
+  if (!tlsPatched.includes("sessionsByProxy")) return "free-lane proxy patch (tls session cache) did not install the proxy-keyed cache";
+  if (tlsPatched.includes("let sessionPromise")) return "free-lane proxy patch (tls session cache) left the old session cache in place";
+
+  return null;
+}
+
 async function selfTest() {
   return (
     testInjector() ||
     testProviderPatch() ||
     testVersionPatch() ||
     testSessionPatch() ||
+    testFreeLaneProxy() ||
     (await proxyPatch.selfTest())
   );
 }
@@ -501,7 +754,7 @@ async function start() {
   const ver = result.version ? ` 9router=${result.version}` : "";
   const written = result.files.length ? " files=" + result.files.join(",") : "";
   console.log(
-    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} session=${result.applied.session} proxyTest=${result.applied.proxyTest} (${result.applied.changed} chunk(s) written)${ver}${written}`
+    `opencode patch: provider=${result.applied.provider} catalog=${result.applied.catalog} capabilities=${result.applied.capabilities} version=${result.applied.version} relay=${result.applied.relay} session=${result.applied.session} freelanProxy=${result.applied.freelanProxy} proxyTest=${result.applied.proxyTest} (${result.applied.changed} chunk(s) written)${ver}${written}`
   );
   if (!result.state.session) {
     console.warn("WARN: opencode session cache anchor not found; a 429 still needs a manual restart");
@@ -555,9 +808,14 @@ module.exports = {
   testProviderPatch,
   testVersionPatch,
   testSessionPatch,
+  testFreeLaneProxy,
   patchProvider,
   patchVersion,
   patchSession,
+  patchFreeLaneProxy,
+  patchFreeLaneProxyExecutor,
+  patchProxyFetchAdapter,
+  patchTlsSessionCache,
   proxyPatch
 };
 
